@@ -2341,7 +2341,7 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	env = append(env, providerLifecycleDoltPathEnv(cityPath)...)
 	gcBin, err := resolveProviderLifecycleGCBinary()
 	if err != nil {
-		return nil, fmt.Errorf("resolve invoking gc executable: %w", err)
+		return nil, err
 	}
 	if gcBin != "" {
 		env = pinInvokingGCBinary(env, gcBin)
