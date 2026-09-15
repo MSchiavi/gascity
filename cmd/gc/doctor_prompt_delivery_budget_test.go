@@ -263,7 +263,7 @@ func TestPromptDeliveryBudgetCheck_PromptModeNone_BypassesSizeGuard(t *testing.T
 	}
 }
 
-func TestPromptDeliveryBudgetCheck_ProviderResolutionError(t *testing.T) {
+func TestPromptDeliveryBudgetCheck_UnresolvableProvider_DoesNotBlockDeliveryCheck(t *testing.T) {
 	clearPromptDeliveryBudgetEnv(t)
 	cityPath := t.TempDir()
 	tmpl := writePromptFile(t, cityPath, "prompts/badprovider.md", "short prompt body")
@@ -274,6 +274,12 @@ func TestPromptDeliveryBudgetCheck_ProviderResolutionError(t *testing.T) {
 		PromptTemplate: tmpl,
 		// No StartCommand: forces provider-name resolution, which fails
 		// because "does-not-exist" is absent from cfg.Providers (nil/empty).
+		// ResolveProvider's error is intentionally ignored here (mirroring
+		// cmd_prime.go), so this agent's prompt is still judged purely on
+		// delivery-budget merits: a short, well-formed prompt should clear
+		// with StatusOK rather than being hard-failed for an unrelated,
+		// out-of-scope provider misconfiguration (that's provider-catalog's
+		// job, not this check's).
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},
@@ -281,15 +287,8 @@ func TestPromptDeliveryBudgetCheck_ProviderResolutionError(t *testing.T) {
 	}
 
 	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
-	if res.Status != doctor.StatusError {
-		t.Fatalf("unresolvable provider: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
-	}
-	details := joinedDetails(res)
-	if !strings.Contains(details, agent.Name) {
-		t.Errorf("details missing agent name %q: %v", agent.Name, res.Details)
-	}
-	if !strings.Contains(details, "provider resolution failed") {
-		t.Errorf("details missing provider-resolution-failure wording: %v", res.Details)
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("unresolvable provider with a safe prompt: status = %v, want StatusOK; message=%q details=%v", res.Status, res.Message, res.Details)
 	}
 }
 
@@ -297,10 +296,14 @@ func TestPromptDeliveryBudgetCheck_RenderError(t *testing.T) {
 	clearPromptDeliveryBudgetEnv(t)
 	cityPath := t.TempDir()
 	// .template.md forces actual Go-template execution (unlike a plain .md
-	// passthrough); {{.NoSuchField}} references a field PromptContext does
-	// not have, so tmpl.Execute fails and renderPromptWithMeta falls back to
-	// the raw unrendered body (tiny, nowhere near either size threshold).
-	tmpl := writePromptFile(t, cityPath, "prompts/broken.template.md", "{{.NoSuchField}}")
+	// passthrough). buildTemplateData flattens PromptContext into a
+	// map[string]string, and the "missingkey=zero" option silently zeroes an
+	// absent top-level key rather than erroring — so a bare {{.NoSuchField}}
+	// would NOT fail. Chaining a further field access onto that zeroed
+	// string result does fail (a string has no fields), so tmpl.Execute
+	// errors and renderPromptWithMeta falls back to the raw unrendered body
+	// (tiny, nowhere near either size threshold).
+	tmpl := writePromptFile(t, cityPath, "prompts/broken.template.md", "{{.NoSuchField.Nested}}")
 	agent := promptFixtureAgent("render-error-agent", tmpl, "subprocess", "arg")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},

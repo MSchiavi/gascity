@@ -41,6 +41,7 @@ order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
+prompt-delivery-budget
 mcp-config
 mcp-shared-target
 builtin-pack-imports
