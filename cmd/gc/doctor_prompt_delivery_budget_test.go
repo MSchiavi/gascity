@@ -11,21 +11,18 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// clearPromptDeliveryBudgetEnv unsets the ambient GC_* variables that
+// clearPromptDeliveryBudgetEnv clears the ambient GC_* variables that
 // buildPrimeContextFor reads directly (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG,
-// GC_RIG_ROOT), restoring any prior value on test cleanup. Without this, a
+// GC_RIG_ROOT), auto-restored by t.Setenv on test cleanup. Without this, a
 // test run from inside a real gc-managed session (which sets these) would
 // leak ambient rig/agent identity into what should be a hermetic fixture.
+// Every reader of these vars (cmd_prime.go's buildPrimeContextFor) treats
+// an empty value the same as unset (`os.Getenv(k) != ""`), so t.Setenv(k,
+// "") is behaviorally equivalent to unsetting.
 func clearPromptDeliveryBudgetEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"GC_ALIAS", "GC_AGENT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
-		old, had := os.LookupEnv(k)
-		if err := os.Unsetenv(k); err != nil {
-			t.Fatalf("clearPromptDeliveryBudgetEnv: unset %s: %v", k, err)
-		}
-		if had {
-			t.Cleanup(func() { os.Setenv(k, old) }) //nolint:errcheck
-		}
+		t.Setenv(k, "")
 	}
 }
 
