@@ -385,3 +385,107 @@ func TestPromptDeliveryBudgetCheck_RegisteredInDoctorChecks(t *testing.T) {
 		t.Errorf("prompt-delivery-budget not registered; names=%v", names)
 	}
 }
+
+// TestPromptDeliveryBudgetCheck_CanFixIsFalse guards the CanFix() contract
+// directly: this check only surfaces oversized/broken prompt templates for a
+// human to edit, so it must never claim it can auto-fix them.
+func TestPromptDeliveryBudgetCheck_CanFixIsFalse(t *testing.T) {
+	check := newPromptDeliveryBudgetDoctorCheck("", nil, fakePromptDeliveryLookPath)
+	if check.CanFix() {
+		t.Fatalf("CanFix() = true, want false: prompt-template fixes require human judgment about content, not an automated rewrite")
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_NoPromptLeakageInDetails guards against the
+// check's Details/Message ever embedding the offending prompt's raw content.
+// The classification messages are built from fmt.Sprintf with the agent name
+// and runtime, never the prompt text itself, but a future edit that adds
+// %v-of-the-prompt for debugging would leak arbitrarily large (and
+// potentially sensitive) template output into doctor's summary surface.
+func TestPromptDeliveryBudgetCheck_NoPromptLeakageInDetails(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	body := strings.Repeat("a", 100000) // raw=100000: trips the hard-fail guard (see OversizedRaw_UnsupportedRuntime)
+	tmpl := writePromptFile(t, cityPath, "prompts/leakage.md", body)
+	agent := promptFixtureAgent("leakage-agent", tmpl, "subprocess", "arg")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("setup check: status = %v, want StatusError (fixture must actually hard-fail for this test to be meaningful); message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	if strings.Contains(details, body) {
+		t.Errorf("check details leak the raw 100000-byte prompt filler verbatim -- doctor output must summarize, never embed full prompt content (details len=%d)", len(details))
+	}
+	if strings.Contains(res.Message, body) {
+		t.Errorf("check message leaks the raw 100000-byte prompt filler verbatim: message=%q", res.Message)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_MultiRig_PackDirsScopedPerAgent exercises
+// config.City.PackDirsForRig's rigName != "" branch end to end through the
+// check's own Run() -- every other fixture in this file leaves Agent.Dir
+// unset, so ctx.RigName is always "" and the check always takes the
+// AllPackDirs() (union of every rig) branch instead. Two rigs each import a
+// pack dir defining the SAME fragment name ("rig-marker") with very
+// different rendered sizes: if packDirs ever leaked rig beta's pack dir into
+// rig alpha's resolution (or vice versa), alpha's tiny fragment and beta's
+// oversized one would collide and either both or neither agent would
+// hard-fail, instead of exactly beta.
+func TestPromptDeliveryBudgetCheck_MultiRig_PackDirsScopedPerAgent(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+
+	alphaPackDir := t.TempDir()
+	betaPackDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(alphaPackDir, "template-fragments"), 0o755); err != nil {
+		t.Fatalf("mkdir alpha template-fragments: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(betaPackDir, "template-fragments"), 0o755); err != nil {
+		t.Fatalf("mkdir beta template-fragments: %v", err)
+	}
+	smallFragment := `{{define "rig-marker"}}small{{end}}`
+	largeFragment := `{{define "rig-marker"}}` + strings.Repeat("a", 100000) + `{{end}}`
+	if err := os.WriteFile(filepath.Join(alphaPackDir, "template-fragments", "rig-marker.template.md"), []byte(smallFragment), 0o644); err != nil {
+		t.Fatalf("write alpha fragment: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(betaPackDir, "template-fragments", "rig-marker.template.md"), []byte(largeFragment), 0o644); err != nil {
+		t.Fatalf("write beta fragment: %v", err)
+	}
+
+	// .template.md forces real template execution (see RenderError above),
+	// so {{template "rig-marker" .}} actually resolves against whichever
+	// pack dir PackDirsForRig hands this agent's own rig.
+	tmpl := writePromptFile(t, cityPath, "prompts/multirig.template.md", `{{template "rig-marker" .}}`)
+
+	alphaAgent := promptFixtureAgent("rig-alpha-agent", tmpl, "subprocess", "arg")
+	alphaAgent.Dir = "alpha" // legacy dir-as-rig convention (workdir.ConfiguredRigName): Dir == a configured Rig.Name
+	betaAgent := promptFixtureAgent("rig-beta-agent", tmpl, "subprocess", "arg")
+	betaAgent.Dir = "beta"
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+		RigPackDirs: map[string][]string{
+			"alpha": {alphaPackDir},
+			"beta":  {betaPackDir},
+		},
+		Agents: []config.Agent{alphaAgent, betaAgent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("rig-beta agent should hard-fail on its own rig's oversized fragment: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	if !strings.Contains(details, betaAgent.Name) {
+		t.Errorf("details missing beta agent's name %q (its own rig's oversized fragment should hard-fail it): %v", betaAgent.Name, res.Details)
+	}
+	if strings.Contains(details, alphaAgent.Name) {
+		t.Errorf("details unexpectedly mention alpha agent %q -- alpha's own rig fragment is tiny and safe; its presence here means rig beta's pack dir leaked into rig alpha's resolution: %v", alphaAgent.Name, res.Details)
+	}
+}
