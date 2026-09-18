@@ -506,8 +506,9 @@ func reopenClosedConfiguredNamedSessionBead(
 			// tracks that full set (including sleep_intent, wake_attempts, and
 			// churn_count) by construction instead of hand-listing a subset
 			// that drifts from the canonical contract.
-			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"])
-			delete(blockers, "state") // the reopen owns the target state set above.
+			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"], now)
+			delete(blockers, "state")    // the reopen owns the target state set above.
+			delete(blockers, "slept_at") // a respawn is a wake, not a sleep.
 			for k, v := range blockers {
 				batch[k] = v
 			}
@@ -1572,7 +1573,7 @@ func syncSessionBeads(
 	skipClose bool,
 ) map[string]string {
 	openIndex, _ := syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil,
+		cityPath, beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil, nil,
 	)
 	return openIndex
 }
@@ -1588,7 +1589,7 @@ func syncSessionBeadsWithSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		"", beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads,
+		"", beads.SessionStore{Store: store}, nil, desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads, nil,
 	)
 }
 
@@ -1604,6 +1605,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	stderr io.Writer,
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
+	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) (map[string]string, *sessionBeadSnapshot) {
 	// Session class typed at the boundary; the snapshot/repair/close helpers
 	// below take the unwrapped beads.Store. Same underlying store value, behavior
@@ -1628,7 +1630,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	// path; the reload-always delta is the same NDI-tolerated concurrent-writer
 	// visibility the W-pool skew reload already introduced (the retired
 	// snapshotOrLoadSessionBeads only re-listed on a same-cycle create skew).
+	loadExistingStart := time.Now()
 	existing, err := loadSessionBeads(store)
+	// Record before the error return: under store pressure the slow scan is
+	// also the one most likely to fail, so the failing case is the one the
+	// trace most needs. len(existing) is 0 on the error path, which is correct.
+	if recordPhase != nil {
+		recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_existing", loadExistingStart, map[string]any{
+			"existing_count": len(existing),
+			"ok":             err == nil,
+		})
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: listing existing: %v\n", err) //nolint:errcheck
 		return nil, sessionBeads
@@ -1719,12 +1731,23 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if visibleLoaded {
 			return visibleBySessionName, nil
 		}
+		loadVisibleStart := time.Now()
 		open, err := loadSessionBeads(store)
+		if err == nil {
+			visibleBySessionName = indexSessionBeadsByName(open)
+			visibleLoaded = true
+		}
+		// Record before the error return, for the same reason as the scan
+		// above: a failing recovery scan is exactly the one worth timing.
+		if recordPhase != nil {
+			recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index.load_visible_by_session_name", loadVisibleStart, map[string]any{
+				"visible_count": len(visibleBySessionName),
+				"ok":            err == nil,
+			})
+		}
 		if err != nil {
 			return nil, err
 		}
-		visibleBySessionName = indexSessionBeadsByName(open)
-		visibleLoaded = true
 		return visibleBySessionName, nil
 	}
 
@@ -3410,9 +3433,28 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+	return closeBeadPreservingAssignees(store, id, reason, nil, now, stderr)
+}
+
+// closeBeadPreservingAssignees is closeBead with an opt-in exception list: any
+// assignee identity in preserve is left untouched on the work beads that carry
+// it, instead of being cleared by the post-close release.
+//
+// The exception exists for work that the retiring bead never owned. A session
+// bead can carry a runtime name or alias that belongs to a *configured*
+// identity — one that outlives any single bead — and work claimed under that
+// stable identity is demand for the identity, not for the dead bead. Clearing
+// it there is not a repair: it destroys the very demand that would
+// re-materialize the identity's canonical session, turning a recoverable
+// name-collision into silently stranded work.
+//
+// With a nil or empty preserve set this behaves exactly like closeBead, which
+// is the contract every other caller relies on.
+func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	preserveSet := assigneePreserveSet(preserve)
 	// Idempotence: closeBead is reached from three reconciler paths
 	// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
 	// closeSessionBeadIfReachableStoreUnassigned). On an already-closed
@@ -3457,9 +3499,28 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	if snapshotErr == nil {
-		releaseWorkFromClosedSessionBead(store, snapshot, stderr)
+		releaseWorkFromClosedSessionBeadExcept(store, snapshot, preserveSet, stderr)
 	}
 	return true
+}
+
+// assigneePreserveSet normalizes an assignee exception list into the trimmed,
+// non-empty set releaseWorkFromClosedSessionBeadExcept compares against. A nil
+// or all-blank list yields a nil set, which preserves nothing.
+func assigneePreserveSet(preserve []string) map[string]struct{} {
+	if len(preserve) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(preserve))
+	for _, val := range preserve {
+		if val = strings.TrimSpace(val); val != "" {
+			set[val] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 // releaseWorkFromClosedSessionBead clears the assignee on every non-closed
@@ -3473,6 +3534,15 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 // releaseOrphanedPoolAssignments at the top of the next reconcile tick is
 // our idempotent fallback.
 func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead, stderr io.Writer) {
+	releaseWorkFromClosedSessionBeadExcept(store, sessionBead, nil, stderr)
+}
+
+// releaseWorkFromClosedSessionBeadExcept is releaseWorkFromClosedSessionBead
+// with an exception set: an identity present in preserve is dropped from the
+// scan, so work assigned under it keeps its assignee. Every other identity the
+// session bead carries is released as usual. A nil or empty preserve set makes
+// this identical to releaseWorkFromClosedSessionBead.
+func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sessionBead beads.Bead, preserve map[string]struct{}, stderr io.Writer) {
 	if store == nil {
 		return
 	}
@@ -3502,6 +3572,9 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		seenAssignees[val] = struct{}{}
 	}
 	for _, id := range sessionBeadAssigneeIdentities(sessionBead) {
+		if _, skip := preserve[strings.TrimSpace(id)]; skip {
+			continue
+		}
 		addAssignee(id)
 	}
 

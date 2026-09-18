@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -256,7 +257,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -306,6 +307,12 @@ type NativeDoltStore struct {
 	generation uint64
 	actor      string
 	idPrefix   string
+
+	// sawRows latches when the backend answered a read of this store with at
+	// least one row, counted as the backend returned it and before
+	// ApplyListQuery narrows it. It is the RowWitness evidence for this
+	// backend; see row_witness.go for what a caller may conclude from it.
+	sawRows atomic.Bool
 
 	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
 	// binding claims. Empty leaves the store unfenced, which is the shipped
@@ -475,6 +482,10 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 	return storage, err
 }
 
+// nativeIssuePrefixConfigKey is the upstream config key naming the namespace a
+// Dolt-backed ledger mints under.
+const nativeIssuePrefixConfigKey = "issue_prefix"
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -495,7 +506,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -918,17 +929,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			if len(node.MetadataRefs) == 0 {
 				continue
 			}
-			mergedMeta, err := metadataMapFromNative(issues[i].Metadata)
-			if err != nil {
-				return fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
-			}
-			if mergedMeta == nil {
-				mergedMeta = make(map[string]string, len(node.MetadataRefs))
-			}
+			refs := make(map[string]string, len(node.MetadataRefs))
 			for metaKey, refKey := range node.MetadataRefs {
-				mergedMeta[metaKey] = keyToID[refKey]
+				refs[metaKey] = keyToID[refKey]
 			}
-			raw, err := metadataRawFromMap(mergedMeta)
+			raw, err := metadataRawWithOverrides(issues[i].Metadata, refs)
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
 			}
@@ -1169,19 +1174,9 @@ func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
 	}
 	return nativeStoreError(id, tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
@@ -1435,6 +1430,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			}
 			beads = append(beads, bead)
 		}
+		s.noteRows(len(issues))
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
@@ -1756,19 +1752,9 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
 	}
 	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
@@ -2062,19 +2048,9 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
-		metadata, err := metadataMapFromNative(issue.Metadata)
+		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-		}
-		if metadata == nil {
-			metadata = make(map[string]string, len(opts.Metadata))
-		}
-		for k, v := range opts.Metadata {
-			metadata[k] = v
-		}
-		raw, err := metadataRawFromMap(metadata)
-		if err != nil {
-			return nil, err
 		}
 		updates["metadata"] = raw
 	}
@@ -2190,13 +2166,32 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		// only place it can refuse without writing: the upstream library
 		// resolves a same-namespace dependency target itself, after the issue
 		// is committed, so skipping would turn a clean refusal into a create
-		// followed by a compensating delete. Foreign ids the library already
-		// classifies as external and never resolves, so this skip and the
-		// library agree on exactly one line.
-		if dep.Type == beadslib.DepParentChild && !nativeParentIsLocal(issueID, targetID, s.idPrefix) {
-			continue
-		}
-		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
+		// followed by a compensating delete. Every id this skip lets through
+		// under a PREFIXED child is one the library already classifies as
+		// external (isCrossPrefixDep compares the CHILD's prefix to the
+		// target's), so nothing skipped there is resolved post-commit. The
+		// one shape it would still resolve is a dashless parent under a
+		// dashless child — ExtractPrefix reads both as "", so the library
+		// calls them same-namespace; on a mint the library sees the child's
+		// final minted id, not the empty one this check gets. The converse
+		// stopped holding when the store's prefix entered the question below:
+		// a parent inside this store's namespace, under a foreign-prefixed
+		// child, is external to the library and is still refused here, in
+		// front of the write.
+		//
+		// The namespace question is asked about the STORE here, not about
+		// issueID: on a mint the child has no id yet, and the cross-prefix rule
+		// the other dependency kinds use would then skip a parent this store
+		// owns — which is the one parent it can refuse before writing.
+		if dep.Type == beadslib.DepParentChild {
+			local, err := s.parentIsLocalForCreate(ctx, storage, issueID, targetID)
+			if err != nil {
+				return err
+			}
+			if !local {
+				continue
+			}
+		} else if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
 			continue
 		}
 		issue, err := storage.GetIssue(ctx, targetID)
@@ -2208,6 +2203,37 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		}
 	}
 	return nil
+}
+
+// parentIsLocalForCreate answers nativeParentIsLocal's question on the create
+// path, where the child's id may not exist yet.
+//
+// A minted child lands in the namespace this store mints under, so that is the
+// namespace the answer has to be about. Every production open already knows it
+// — openNativeStorage reads issue_prefix while the scoped env is projected — and
+// a store constructed without one asks the storage layer, rather than
+// answering "foreign" for every parent, when the child's id names no
+// namespace either. Answering foreign there is what let Create admit a
+// dangling parent inside this store's own namespace while Update, which
+// sees the child's real id, refused the same value.
+//
+// The fallback reaches no further than that. A foreign-prefixed child on a
+// prefix-less store is still judged against the CHILD's prefix, so the two
+// arms can still disagree on that shape — but only a handle built without
+// an open reaches it, since every production open caches the prefix, and
+// an empty one there means the ledger declares no namespace at all. Closing
+// the residual needs storage plumbed through the update arms too; ga-0fmv4
+// tracks it.
+func (s *NativeDoltStore) parentIsLocalForCreate(ctx context.Context, storage beadslib.Storage, issueID, parentID string) (bool, error) {
+	prefix := s.idPrefix
+	if prefix == "" && beadIDPrefix(issueID) == "" {
+		configured, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		if err != nil {
+			return false, fmt.Errorf("reading native issue prefix: %w", err)
+		}
+		prefix = normalizeIDPrefix(configured)
+	}
+	return nativeParentIsLocal(issueID, parentID, prefix), nil
 }
 
 func (s *NativeDoltStore) compensateFailedCreate(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
@@ -2244,34 +2270,47 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
 		return false
 	}
-	sourcePrefix := nativeBeadIDPrefix(issueID)
+	sourcePrefix := beadIDPrefix(issueID)
 	if sourcePrefix == "" {
 		sourcePrefix = normalizeIDPrefix(storePrefix)
 	}
-	targetPrefix := nativeBeadIDPrefix(targetID)
+	targetPrefix := beadIDPrefix(targetID)
 	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
 }
 
-// nativeParentIsLocal reports whether a parent id is one THIS store could have
-// minted — the only case in which resolving it is a legitimate refusal rather
+// nativeParentIsLocal reports whether a parent id names a row THIS store would
+// hold — the only case in which resolving it is a legitimate refusal rather
 // than a blind spot.
 //
-// A store that declares no namespace answers false for every id. That is not a
-// technicality: such a store cannot tell its own rows from another ledger's, so
-// every id it is handed might be foreign, and the weak reading is the only one
-// that cannot refuse a bead that exists.
+// Two prefixes make a parent local, and they answer different questions. The
+// STORE's own mint prefix is the namespace it owns: an absent row there is an
+// absence this store can see, whatever prefix the CHILD carries — a pinned id
+// or a relic a storage migration copied in carries another ledger's, and
+// reading the question off the child alone would call the store's own namespace
+// foreign and let the reparent land dangling. The child's prefix is local too,
+// because that is where the upstream library draws the line: issueops resolves
+// a same-prefix dependency target itself, post-commit, with no embedder knob to
+// weaken it, so agreeing with it here keeps the refusal in front of the write
+// instead of behind a compensating delete.
+//
+// Everything else is weak. A store that declares no namespace, asked about a
+// child whose own id names none, cannot tell its rows from another ledger's,
+// and the weak reading is the only one that cannot refuse a bead that exists.
 func nativeParentIsLocal(issueID, parentID, storePrefix string) bool {
-	source := nativeBeadIDPrefix(issueID)
-	if source == "" {
-		source = normalizeIDPrefix(storePrefix)
-	}
-	if source == "" {
+	target := beadIDPrefix(parentID)
+	if target == "" {
 		return false
 	}
-	return source == nativeBeadIDPrefix(parentID)
+	if store := normalizeIDPrefix(storePrefix); store != "" && target == store {
+		return true
+	}
+	return target == beadIDPrefix(issueID)
 }
 
-func nativeBeadIDPrefix(id string) string {
+// beadIDPrefix extracts the prefix segment (before the first "-") from a
+// bead ID, normalized via normalizeIDPrefix. Shared across store backends
+// that need to decide whether two bead IDs belong to the same store.
+func beadIDPrefix(id string) string {
 	before, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(id)), "-")
 	if !ok {
 		return ""
@@ -2609,6 +2648,44 @@ func metadataRawFromMap(metadata map[string]string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshaling metadata: %w", err)
 	}
 	return raw, nil
+}
+
+// metadataRawWithOverrides merges overrides into a bead's stored metadata
+// document, leaving every value the caller did not name byte-identical.
+//
+// Metadata is a single JSON column, so setting one key means rewriting the
+// whole document. Decoding it into map[string]string first (as
+// metadataMapFromNative does, correctly, for callers that want Go strings)
+// renders each non-string value as JSON text, and writing that back persists
+// the rendering: a bead holding {"n": 42} became {"n": "42"} once any
+// unrelated key was set. Decoding into json.RawMessage keeps untouched values
+// exactly as stored. Named keys are written as JSON strings, matching the
+// map[string]string that the store's write API accepts.
+func metadataRawWithOverrides(raw json.RawMessage, overrides map[string]string) (json.RawMessage, error) {
+	values := make(map[string]json.RawMessage)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return nil, fmt.Errorf("unmarshaling metadata: %w", err)
+		}
+		if values == nil {
+			values = make(map[string]json.RawMessage, len(overrides))
+		}
+	}
+	for key, value := range overrides {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata value %q: %w", key, err)
+		}
+		values[key] = encoded
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling metadata: %w", err)
+	}
+	return encoded, nil
 }
 
 func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {
