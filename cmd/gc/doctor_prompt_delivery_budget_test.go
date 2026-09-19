@@ -148,6 +148,12 @@ func TestPromptDeliveryBudgetCheck_OversizedRaw_UnsupportedRuntime(t *testing.T)
 	if !strings.Contains(details, "hard-fail") {
 		t.Errorf("details missing hard-fail classification: %v", res.Details)
 	}
+	if !strings.Contains(details, "configured_mode=arg") {
+		t.Errorf("details missing configured_mode=arg: %v", res.Details)
+	}
+	if !strings.Contains(details, "effective_mode=hard-fail") {
+		t.Errorf("details missing effective_mode=hard-fail: %v", res.Details)
+	}
 }
 
 func TestPromptDeliveryBudgetCheck_OversizedQuoted_UnsupportedRuntime(t *testing.T) {
@@ -171,6 +177,12 @@ func TestPromptDeliveryBudgetCheck_OversizedQuoted_UnsupportedRuntime(t *testing
 	}
 	if !strings.Contains(details, "hard-fail") {
 		t.Errorf("details missing hard-fail classification: %v", res.Details)
+	}
+	if !strings.Contains(details, "configured_mode=arg") {
+		t.Errorf("details missing configured_mode=arg: %v", res.Details)
+	}
+	if !strings.Contains(details, "effective_mode=hard-fail") {
+		t.Errorf("details missing effective_mode=hard-fail: %v", res.Details)
 	}
 }
 
@@ -199,6 +211,26 @@ func TestPromptDeliveryBudgetCheck_OversizedRaw_NudgeFallbackRuntime(t *testing.
 	if !strings.Contains(details, "nudge") {
 		t.Errorf("details missing nudge-fallback classification: %v", res.Details)
 	}
+	if !strings.Contains(details, "configured_mode=arg") {
+		t.Errorf("details missing configured_mode=arg: %v", res.Details)
+	}
+	if !strings.Contains(details, "effective_mode=nudge-fallback") {
+		t.Errorf("details missing effective_mode=nudge-fallback: %v", res.Details)
+	}
+	// body is 100000 'a's: raw=100000 (trips the raw guard at its exact
+	// limit), quoted=100002 (no embedded quotes to escape, so 100000+2).
+	if !strings.Contains(details, "raw_bytes=100000") {
+		t.Errorf("details missing raw_bytes=100000: %v", res.Details)
+	}
+	if !strings.Contains(details, "raw_limit=100000") {
+		t.Errorf("details missing raw_limit=100000: %v", res.Details)
+	}
+	if !strings.Contains(details, "argv_bytes=100002") {
+		t.Errorf("details missing argv_bytes=100002: %v", res.Details)
+	}
+	if !strings.Contains(details, "argv_limit=128000") {
+		t.Errorf("details missing argv_limit=128000: %v", res.Details)
+	}
 }
 
 func TestPromptDeliveryBudgetCheck_OversizedQuoted_NudgeFallbackRuntime(t *testing.T) {
@@ -225,6 +257,26 @@ func TestPromptDeliveryBudgetCheck_OversizedQuoted_NudgeFallbackRuntime(t *testi
 	}
 	if !strings.Contains(details, "nudge") {
 		t.Errorf("details missing nudge-fallback classification: %v", res.Details)
+	}
+	if !strings.Contains(details, "configured_mode=arg") {
+		t.Errorf("details missing configured_mode=arg: %v", res.Details)
+	}
+	if !strings.Contains(details, "effective_mode=nudge-fallback") {
+		t.Errorf("details missing effective_mode=nudge-fallback: %v", res.Details)
+	}
+	// body is 32000 "'"s: raw=32000 (safe), quoted=4*32000+2=128002 (each
+	// embedded ' becomes '\'', trips the quoted guard past its limit).
+	if !strings.Contains(details, "raw_bytes=32000") {
+		t.Errorf("details missing raw_bytes=32000: %v", res.Details)
+	}
+	if !strings.Contains(details, "raw_limit=100000") {
+		t.Errorf("details missing raw_limit=100000: %v", res.Details)
+	}
+	if !strings.Contains(details, "argv_bytes=128002") {
+		t.Errorf("details missing argv_bytes=128002: %v", res.Details)
+	}
+	if !strings.Contains(details, "argv_limit=128000") {
+		t.Errorf("details missing argv_limit=128000: %v", res.Details)
 	}
 }
 
