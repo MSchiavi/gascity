@@ -152,23 +152,23 @@ var routedToAllowlist = []routedToSite{
 	// WithRouteChangeClearing wrapped in during the GREEN phase. ---
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5305,
+		line:   5342,
 		reason: "write to a pre-existing bead (canonicalize routed_to spelling on assignee-change repair pass); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5365,
+		line:   5402,
 		reason: "write to a pre-existing bead (canonicalizeLegacyBoundUnassignedRoutedWork); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6140,
+		line:   6210,
 		reason: "write to a pre-existing bead (controlDispatcherRouteRepair.persist, repairControlDispatcherRoutesForStoreScope); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6167,
-		reason: "in-memory mirror of the line-6140 persisted write (applyRouteRepairInMemory), applied only after the durable write at line 6140 already succeeded; same Root #5 -- wrap that root's store construction in GREEN phase",
+		line:   6237,
+		reason: "in-memory mirror of the line-6210 persisted write (applyRouteRepairInMemory), applied only after the durable write at line 6210 already succeeded; same Root #5 -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/cmd_convoy_dispatch.go",
