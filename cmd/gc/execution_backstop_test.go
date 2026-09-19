@@ -800,7 +800,7 @@ func TestExecutionBackstopConvergesWhenTheActivityClockCountsItsOwnNudge(t *test
 	// Enough cycles to spend the whole re-arm budget AND the attempt ladder
 	// behind it, plus slack to prove the drain is requested exactly once.
 	delivered := 0
-	for i := 0; i < 2*(maxExecutionClaimNudgeDecays+idleClaimNudgeMaxAttempts)+6; i++ {
+	for i := 0; i < 2*(maxExecutionClaimNudgeDecays+idleClaimNudgeMaxAttempts)+6 && len(f.drained) == 0; i++ {
 		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 		f.tick(t)
 		if f.nudgeCount() > delivered {
@@ -811,6 +811,11 @@ func TestExecutionBackstopConvergesWhenTheActivityClockCountsItsOwnNudge(t *test
 			f.sp.SetActivity(f.sessName, f.now.Add(time.Second))
 		}
 	}
+
+	// The latch suppresses repeated ticks within its retry window. A drain
+	// that never lands is deliberately retried after that window.
+	f.now = f.now.Add(2 * time.Minute)
+	f.tick(t)
 
 	if len(f.drained) != 1 || f.drained[0] != f.sessName {
 		t.Fatalf("drain requests for a self-echoing seat = %v, want exactly one for %s (the re-arm is bounded); stdout=%s", f.drained, f.sessName, f.stdout.String())
@@ -947,7 +952,6 @@ func TestExecutionBackstopReEscalatesWhenTheLatchedDrainNeverLanded(t *testing.T
 
 	// Same incarnation, drain evaporated, latch goes stale.
 	f.now = f.now.Add(executionStalledLatchRetryAfter + time.Minute)
-	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
 
 	if len(f.drained) != 2 {
@@ -956,7 +960,6 @@ func TestExecutionBackstopReEscalatesWhenTheLatchedDrainNeverLanded(t *testing.T
 
 	// And the fresh latch pauses the cycle again: no third drain immediately.
 	f.now = f.now.Add(2 * time.Minute)
-	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
 	if len(f.drained) != 2 {
 		t.Fatalf("drains right after re-latching = %v, want still 2", f.drained)
