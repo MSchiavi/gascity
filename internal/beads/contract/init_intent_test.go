@@ -86,3 +86,26 @@ func TestResolveInitIntentRejectsUnknownPersistedMode(t *testing.T) {
 		t.Fatal("unknown persisted dolt mode was accepted")
 	}
 }
+
+// Retained from #5996 while consolidating the precedence implementation.
+func TestResolveInitIntentPreservesPersistedDirectExternal(t *testing.T) {
+	persisted := InitScopeState{Initialized: true, Backend: "dolt", DoltMode: "server", Target: "external"}
+	got, err := ResolveInitIntent(persisted, InitIntent{}, InitIntent{}, InitIntent{Transport: "direct", Target: "external"}, InitIntent{Transport: "proxied", Target: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Intent != (InitIntent{Transport: "direct", Target: "external"}) || got.Source != "persisted" {
+		t.Fatalf("got %+v, want persisted direct/external", got)
+	}
+}
+
+// Retained from #5996 while consolidating the precedence implementation.
+func TestResolveInitIntentCanonicalizesValues(t *testing.T) {
+	got, err := ResolveInitIntent(InitScopeState{}, InitIntent{Transport: " PROXIED ", Target: " LOCAL "}, InitIntent{}, InitIntent{}, InitIntent{Transport: "direct", Target: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Intent != (InitIntent{Transport: "proxied", Target: "local"}) {
+		t.Fatalf("got %+v, want canonical proxied/local", got)
+	}
+}
