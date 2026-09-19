@@ -114,9 +114,9 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, c.cfg.Runtimes)
 		switch {
 		case dErr != nil:
-			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback: %v", a.Name, effProvider, dErr))
+			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.Name, effProvider, delivery.ConfiguredMode, delivery.EffectiveMode, dErr))
 		case delivery.OversizedFallback:
-			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge", a.Name, effProvider))
+			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.Name, effProvider, delivery.ConfiguredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
 		case renderErrs.Len() > 0:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.Name, a.PromptTemplate))
 		}
