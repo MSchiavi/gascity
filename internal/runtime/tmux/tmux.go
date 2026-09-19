@@ -2202,6 +2202,12 @@ const (
 	// recovery loop paces generously and stops the moment the marker clears.
 	submitDraftRecoverySends   = 8
 	submitDraftRecoveryBackoff = time.Second
+	// stagedDraftObservationLines bounds staged-draft detection to the newest
+	// non-empty captured lines. CapturePane starts at -S -120, so the capture
+	// includes SCROLLBACK: an unscoped match would let a submitted turn's
+	// transcript entry authorize recovery Enters into an idle pane forever.
+	// Same guard, same shape as codexInterruptBoundaryRecentLines.
+	stagedDraftObservationLines = 12
 )
 
 // submitEnterAndConfirm sends the provider's submit key sequence (see
@@ -2289,12 +2295,25 @@ func (t *Tmux) paneShowsStagedDraft(target string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, line := range lines {
+	return linesShowStagedDraft(lines), nil
+}
+
+// linesShowStagedDraft reports whether the LIVE composer holds an
+// unsubmitted pasted draft. Scoped to the newest non-empty lines because
+// the capture includes scrollback (see stagedDraftObservationLines).
+func linesShowStagedDraft(lines []string) bool {
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < stagedDraftObservationLines; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		seen++
 		if strings.Contains(line, "[Pasted Content") {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // paneBusy reports whether the target pane shows an active processing indicator

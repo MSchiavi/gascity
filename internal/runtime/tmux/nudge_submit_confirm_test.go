@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -190,5 +191,60 @@ func TestSubmitEnterAndConfirmNoDraftKeepsTheOldContract(t *testing.T) {
 	}
 	if sends != submitEnterMaxSends {
 		t.Fatalf("sends=%d, want exactly the ordinary window %d", sends, submitEnterMaxSends)
+	}
+}
+
+// TestLinesShowStagedDraftIgnoresScrollbackMarker pins the scope of the
+// ga-wr4ft probe: CapturePane reaches 120 lines back, so a '[Pasted Content'
+// line from a turn that already submitted sits in scrollback forever. An
+// unscoped match would let that stale marker authorize recovery Enters into
+// an idle pane on every later nudge.
+func TestLinesShowStagedDraftIgnoresScrollbackMarker(t *testing.T) {
+	lines := []string{"[Pasted Content 11234 chars]"}
+	for i := 0; i < stagedDraftObservationLines+3; i++ {
+		lines = append(lines, fmt.Sprintf("transcript line %d", i))
+	}
+	lines = append(lines, "> ")
+
+	if linesShowStagedDraft(lines) {
+		t.Fatalf("linesShowStagedDraft() = true for a marker %d non-empty lines back, want false", len(lines)-1)
+	}
+}
+
+// TestLinesShowStagedDraftSeesTheLiveComposerMarker: the composer is always at
+// the bottom of the pane, so a marker inside the recency window is the live
+// staged draft and must still be seen -- including when the TUI pads the
+// composer with blank rows, which do not consume the window.
+func TestLinesShowStagedDraftSeesTheLiveComposerMarker(t *testing.T) {
+	transcript := func() []string {
+		var out []string
+		for i := 0; i < stagedDraftObservationLines+5; i++ {
+			out = append(out, fmt.Sprintf("transcript line %d", i))
+		}
+		return out
+	}
+
+	tests := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			name:  "marker in the live composer",
+			lines: append(transcript(), "[Pasted Content 11234 chars]", "> "),
+		},
+		{
+			name: "blank rows do not consume the window",
+			lines: append(transcript(),
+				"[Pasted Content 11234 chars]", "", "", "", "", "", "",
+				"", "", "", "", "", "", "> "),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !linesShowStagedDraft(tt.lines) {
+				t.Fatalf("linesShowStagedDraft() = false, want true (the draft is live)")
+			}
+		})
 	}
 }
