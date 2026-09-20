@@ -1595,6 +1595,8 @@ func ProviderFamily(provider string) string {
 		return "amp"
 	case strings.Contains(p, "codex"):
 		return "codex"
+	case strings.Contains(p, "muse"):
+		return "muse"
 	case strings.Contains(p, "copilot"):
 		return "copilot"
 	case p == "cursor" || strings.HasPrefix(p, "cursor/") || strings.HasSuffix(p, "/cursor") || strings.HasSuffix(p, "-cursor") || p == "cursor-agent":

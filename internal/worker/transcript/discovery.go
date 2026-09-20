@@ -52,6 +52,8 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return sessionlog.FindCursorSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "grok":
 		return sessionlog.FindGrokSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "muse":
+		return sessionlog.FindMuseSessionFileByIDNoWindow(searchPaths, workDir, gcSessionID)
 	case "kiro":
 		return sessionlog.FindKiroSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "gemini":

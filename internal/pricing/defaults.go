@@ -13,8 +13,9 @@ package pricing
 //
 // Returned slice is freshly allocated; callers may mutate.
 func DefaultPricings() []ModelPricing {
-	out := make([]ModelPricing, len(claudeDefaults))
-	copy(out, claudeDefaults)
+	out := make([]ModelPricing, 0, len(claudeDefaults)+len(museDefaults))
+	out = append(out, claudeDefaults...)
+	out = append(out, museDefaults...)
 	return out
 }
 
@@ -121,6 +122,68 @@ var claudeDefaults = []ModelPricing{
 			CompletionUSDPer1M:    5.00,
 			CacheReadUSDPer1M:     0.10,
 			CacheCreationUSDPer1M: 1.25,
+		},
+	},
+}
+
+// museDefaults captures Meta's published Muse Spark API rates.
+//
+// Standard tier ($1.25 input / $4.25 output / $0.15 cached input per 1M) is
+// unchanged across Spark 1.1→1.3; the contributor tier (data-sharing opt-in)
+// cuts those to $0.10 / $0.20 / $0.002. Meta publishes no cache-creation
+// premium, so cache creation is rated at the prompt rate — an assumption,
+// not a published figure; operators who learn otherwise override via
+// [[pricing]] in city.toml or pack.toml.
+//
+// See: https://www.techtimes.com/articles/326714/20260904/meta-muse-spark-contributor-tier-hides-training-consent-where-security-tools-cannot-find-it.htm
+// See: https://thearabianpost.com/meta-deploys-muse-spark-1-3-for-developers/
+var museDefaults = []ModelPricing{
+	// Muse Spark 1.3, standard tier.
+	{
+		Provider:     "muse",
+		Model:        "muse-spark-1.3",
+		LastVerified: "2026-09-20",
+		Tier: Tier{
+			PromptUSDPer1M:        1.25,
+			CompletionUSDPer1M:    4.25,
+			CacheReadUSDPer1M:     0.15,
+			CacheCreationUSDPer1M: 1.25,
+		},
+	},
+	// Muse Spark 1.3, contributor tier.
+	{
+		Provider:     "muse",
+		Model:        "muse-spark-1.3-contributor",
+		LastVerified: "2026-09-20",
+		Tier: Tier{
+			PromptUSDPer1M:        0.10,
+			CompletionUSDPer1M:    0.20,
+			CacheReadUSDPer1M:     0.002,
+			CacheCreationUSDPer1M: 0.10,
+		},
+	},
+	// Muse Spark 1.2, standard tier.
+	{
+		Provider:     "muse",
+		Model:        "muse-spark-1.2",
+		LastVerified: "2026-09-20",
+		Tier: Tier{
+			PromptUSDPer1M:        1.25,
+			CompletionUSDPer1M:    4.25,
+			CacheReadUSDPer1M:     0.15,
+			CacheCreationUSDPer1M: 1.25,
+		},
+	},
+	// Muse Spark 1.2, contributor tier.
+	{
+		Provider:     "muse",
+		Model:        "muse-spark-1.2-contributor",
+		LastVerified: "2026-09-20",
+		Tier: Tier{
+			PromptUSDPer1M:        0.10,
+			CompletionUSDPer1M:    0.20,
+			CacheReadUSDPer1M:     0.002,
+			CacheCreationUSDPer1M: 0.10,
 		},
 	},
 }

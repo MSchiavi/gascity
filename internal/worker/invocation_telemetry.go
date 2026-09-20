@@ -54,6 +54,12 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
+//   - muse: identity-first. When the session bead carries a session_key, the
+//     session dir is keyed by that id between bead creation and the wake
+//     anchor. Without one, the bounded wake-anchored window lookup runs over
+//     the date-partitioned session store, filtering by session.jsonl mtime
+//     and the head-carried workspace_root, refusing ambiguity. Extraction
+//     reads runtime.session run/model_completed events.
 //   - codex: identity-first. When the session bead carries a session_key
 //     (captured from the codex hook; codex rollout filenames end in the
 //     same uuid), the rollout is resolved by that suffix via
@@ -306,18 +312,25 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverCodexInvocationTranscript,
 		extract:  SessionLogAdapter.CodexTailUsage,
 	},
+	"muse": {
+		discover: discoverMuseInvocationTranscript,
+		extract:  SessionLogAdapter.MuseTailUsage,
+	},
 }
 
 // invocationUsageFamily resolves a provider string to its registered
 // invocation-usage family key: claude-family providers (including
-// claude-eco) match by name, codex resolves through sessionlog.ProviderFamily,
-// and everything else returns "" (unregistered).
+// claude-eco) match by name, codex and muse resolve through
+// sessionlog.ProviderFamily, and everything else returns "" (unregistered).
 func invocationUsageFamily(provider string) string {
 	if strings.Contains(strings.ToLower(provider), "claude") {
 		return "claude"
 	}
 	if sessionlog.ProviderFamily(provider) == "codex" {
 		return "codex"
+	}
+	if sessionlog.ProviderFamily(provider) == "muse" {
+		return "muse"
 	}
 	return ""
 }
@@ -384,6 +397,41 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 		workDir,
 		anchor,
 		codexInvocationDiscoveryWindow,
+	)
+}
+
+// museInvocationDiscoveryWindow bounds how far after the wake anchor a muse
+// session's transcript may have been last written and still be attributed to
+// the session. The muse CLI appends to session.jsonl on every turn, so the
+// file mtime tracks the wake within seconds; the window absorbs slow starts
+// without re-opening an unbounded date-tree search.
+const museInvocationDiscoveryWindow = 10 * time.Minute
+
+// discoverMuseInvocationTranscript resolves a muse session transcript.
+// Identity first: when the bead carries a session_key, the session dir is
+// keyed by that id between bead creation and the wake anchor — a keyed miss
+// returns "" with NO window fallback, mirroring the codex rule that a
+// window-found transcript with a different id would be misattribution.
+// Without a session_key (the common case — gc passes no session id to the
+// muse CLI), the bounded wake-anchored window lookup runs: the anchor is the
+// session's last_woke_at metadata, falling back to bead creation time.
+// Ambiguous or out-of-window sessions yield "" — telemetry silently records
+// nothing rather than misattributing.
+func discoverMuseInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
+	anchor := createdAt
+	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
+		anchor = woke
+	}
+	workDir := contract.WorkerDirFromMetadata(meta)
+	if sessionKey := strings.TrimSpace(meta["session_key"]); sessionKey != "" {
+		return sessionlog.FindMuseSessionFileByID(
+			h.adapter.SearchPaths, workDir, sessionKey, createdAt, anchor)
+	}
+	return sessionlog.FindMuseSessionFileNear(
+		h.adapter.SearchPaths,
+		workDir,
+		anchor,
+		museInvocationDiscoveryWindow,
 	)
 }
 
@@ -470,20 +518,23 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // nothing new was pending) OR the miss is permanent (unregistered family; a
 // keyless codex session whose bounded workdir+window fallback found no unambiguous
 // rollout in a CLEAN scan — a closed session's rollout is already on disk, so that
-// miss is ambiguity/out-of-window/TZ, which no retry resolves; or a keyless claude
+// miss is ambiguity/out-of-window/TZ, which no retry resolves; a keyless muse
+// session whose bounded workspace+interval fallback found no unambiguous
+// transcript in a CLEAN scan — same permanence argument; or a keyless claude
 // session whose transcript lookup refused an ambiguous shared workdir, which no
 // retry resolves either while the pool shares that directory); false when the
-// miss is transient (a keyed codex rollout not discovered yet, a keyless codex
-// scan clouded by a transient IO fault, a keyless claude transcript lookup that
-// failed to read the store, a keyless claude session that is UNAMBIGUOUS but whose
-// transcript is not on disk yet, an extraction error, or a sink Record
-// failure) so the caller should retry on a later tick. err is reserved for
+// miss is transient (a keyed codex or muse transcript not discovered yet, a
+// keyless codex or muse scan clouded by a transient IO fault, a keyless claude
+// transcript lookup that failed to read the store, a keyless claude session that
+// is UNAMBIGUOUS but whose transcript is not on disk yet, an extraction error,
+// or a sink Record failure) so the caller should retry on a later tick. err is
+// reserved for
 // a sink Record failure; the cursor is then advanced only through the last
 // successfully recorded entry so the retry resumes at the gap rather than
 // skipping it. Every gate is slog.Debug'd so a fleet-wide zero is attributable in
 // the field instead of silently swallowed.
 //
-// Coverage ceiling, per transcript family — the two families differ, and the
+// Coverage ceiling, per transcript family — the three families differ, and the
 // difference is deliberate:
 //
 //   - claude: cursor-bounded growth, capped at 16MB — once a cursor exists.
@@ -512,6 +563,11 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //     Widening it needs its own correctness argument rather than this one: the
 //     codex extractor collapses on cumulative totals rather than per-message
 //     identity, so the cursor is not a usable stop condition there.
+//   - muse: still the fixed 64KB tail, and still silently lossy, for the same
+//     structural reason as codex. SessionLogAdapter.MuseTailUsage accepts the
+//     cursor and discards it; widening it to cursor-bounded growth (the run
+//     record id IS a stable per-message identity, so the stop condition
+//     exists) needs its own latency review on the synchronous lanes first.
 //
 // Neither risk the old blanket "do not widen" ceiling cited survives
 // cursor-bounded growth, which is why claude was widened. The scan is not
@@ -549,7 +605,8 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
-	if (keylessCodex || keylessClaude) && !scanClean {
+	keylessMuse := family == "muse" && keyless
+	if (keylessCodex || keylessClaude || keylessMuse) && !scanClean {
 		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
 		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
 		// scan whether or not a path was found: an empty result may have hidden the
@@ -565,7 +622,7 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		return 0, false, nil
 	}
 	if path == "" {
-		if (keylessCodex || keylessClaude) && emptyIsPermanent {
+		if (keylessCodex || keylessClaude || keylessMuse) && emptyIsPermanent {
 			// Clean, PERMANENT miss: the keyless codex workdir fallback found nothing
 			// (ambiguity / out-of-window / TZ), or the claude lookup REFUSED a shared
 			// workdir it cannot disambiguate. Neither is resolved by a retry, so settle
@@ -595,13 +652,15 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 // it, so a caller that memoizes discovery can distinguish the two kinds: true
 // means there is definitively nothing to find (an unregistered provider family;
 // a keyless codex session whose bounded workdir+window fallback came up empty
-// on a CLEAN scan; or a keyless claude session whose transcript lookup cleanly
-// refused an ambiguous shared workdir) and re-running discovery is pure waste;
-// false means the miss is transient (a keyed rollout not flushed yet, a keyless
-// codex scan clouded by an I/O fault, which leaves both an empty result and a
-// lone hit non-definitive, a keyless claude lookup that failed to read the store,
-// or an unambiguous keyless claude session whose transcript is not written yet)
-// and a later attempt may resolve it. A found path is always settled.
+// on a CLEAN scan; a keyless muse session whose bounded workspace+interval
+// fallback came up empty on a CLEAN scan; or a keyless claude session whose
+// transcript lookup cleanly refused an ambiguous shared workdir) and re-running
+// discovery is pure waste; false means the miss is transient (a keyed transcript
+// not flushed yet, a keyless codex or muse scan clouded by an I/O fault, which
+// leaves both an empty result and a lone hit non-definitive, a keyless claude
+// lookup that failed to read the store, or an unambiguous keyless claude session
+// whose transcript is not written yet) and a later attempt may resolve it. A
+// found path is always settled.
 func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
@@ -615,7 +674,8 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
-	if (keylessCodex || keylessClaude) && !scanClean {
+	keylessMuse := family == "muse" && keyless
+	if (keylessCodex || keylessClaude || keylessMuse) && !scanClean {
 		return "", false
 	}
 	if path == "" {
@@ -623,7 +683,7 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 		// can resolve (codex out-of-window/ambiguity, or the claude shared-workdir
 		// ambiguity refusal) memoizes as settled. A claude transcript that is merely
 		// not written yet stays unsettled so the live lane rediscovers it.
-		return "", (keylessCodex || keylessClaude) && emptyIsPermanent
+		return "", (keylessCodex || keylessClaude || keylessMuse) && emptyIsPermanent
 	}
 	return path, true
 }
@@ -728,7 +788,9 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 
 // discoverSweepTranscript resolves the transcript for the end-of-interval model
 // sweep: claude through the manager's keyed lookup, codex through the captured
-// session_key matched against the rollout filename suffix. The codex lookup is
+// session_key matched against the rollout filename suffix, muse through the
+// captured session_key matched against the session dir name (falling back to
+// the workspace+interval scan when keyless). The codex lookup is
 // bounded to the awake interval's day window via
 // sessionlog.FindCodexSessionFileByID(notBefore=awake_started_at,
 // notAfter=slept_at||now) — NOT the unbounded date-tree walk — because this runs
@@ -792,6 +854,30 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		}
 		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
+		return scanPath, scanClean, true
+	case "muse":
+		workDir := contract.WorkerDirFromMetadata(meta)
+		notBefore, notAfter := sweepIntervalWindow(meta, now)
+		if key := strings.TrimSpace(meta["session_key"]); key != "" {
+			return sessionlog.FindMuseSessionFileByID(
+				f.searchPaths, workDir, key, notBefore, notAfter), true, false
+		}
+		// Keyless fallback: resolve by workspace + awake interval. Requires a
+		// workdir to key on and a non-zero interval start; without either the
+		// scan cannot bound itself and the sweep records nothing — a clean,
+		// permanent miss. Unlike the codex fallback (anchored at the interval
+		// start with a fixed forward window, because a rollout filename carries
+		// its creation time), the muse signal is the transcript mtime — the CLI
+		// appends on every turn, so the trailing writes land near the interval
+		// END. Scanning the whole interval keeps long-awake sessions recoverable
+		// where a start-anchored fixed window would age out.
+		if workDir == "" || notBefore.IsZero() {
+			slog.Debug("model-usage sweep: keyless muse has no workdir/anchor for fallback; skipping",
+				slog.String("session_id", id))
+			return "", true, true
+		}
+		scanPath, scanClean := sessionlog.FindMuseSessionFileInRangeScan(
+			f.searchPaths, workDir, notBefore.Add(-time.Minute), notAfter.Add(time.Minute))
 		return scanPath, scanClean, true
 	default:
 		path, lookup, terr := f.manager.TranscriptPathClassified(id, f.searchPaths)

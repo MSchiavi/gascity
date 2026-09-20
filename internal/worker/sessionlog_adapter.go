@@ -137,6 +137,17 @@ func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.T
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// MuseTailUsage reads per-invocation token usage from the tail of a muse
+// session transcript. Validation merges the muse default root
+// (~/.local/share/muse/sessions) on top of the configured search paths, in
+// the same way the codex route merges its own roots.
+// cursorID is accepted for signature symmetry with TailUsage but not yet
+// honored: the muse family keeps the fixed tail window for now, like codex.
+func (a SessionLogAdapter) MuseTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
+	return sessionlog.ExtractMuseTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
