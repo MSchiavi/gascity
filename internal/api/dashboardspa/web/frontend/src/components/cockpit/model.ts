@@ -1,5 +1,9 @@
 import type { RunLane } from 'gas-city-dashboard-shared';
-import type { RunStatusCounts, UsageTotals } from 'gas-city-dashboard-shared/gc-supervisor';
+import type {
+  RunStatusCounts,
+  UsageRunToday,
+  UsageTotals,
+} from 'gas-city-dashboard-shared/gc-supervisor';
 import { runDetailHref } from '../../supervisor/runHref';
 
 const SEGMENT_FLOOR = 2;
@@ -76,6 +80,59 @@ export function burnPerHour(totals: UsageTotals, windowSeconds: number): number 
   }
   const rate = totals.cost_usd_estimate * (3600 / windowSeconds);
   return Number.isFinite(rate) ? rate : null;
+}
+
+export function dollarsPerMinute(totals: UsageTotals, windowSeconds: number): number | null {
+  if (
+    !Number.isFinite(totals.cost_usd_estimate) ||
+    totals.cost_usd_estimate < 0 ||
+    !Number.isFinite(windowSeconds) ||
+    windowSeconds <= 0
+  ) {
+    return null;
+  }
+  const rate = totals.cost_usd_estimate * (60 / windowSeconds);
+  return Number.isFinite(rate) ? rate : null;
+}
+
+export interface AggregateRunRates {
+  tokensPerMinute: number | null;
+  dollarsPerMinute: number | null;
+  runs: number;
+}
+
+/**
+ * Aggregate per-run rows into a single tokens/min + dollars/min reading with
+ * the summed wall-clock as the rate basis. Null when there are no rows; each
+ * rate is independently null when its basis is missing (no wall-clock) or its
+ * numerator is invalid.
+ */
+export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunRates | null {
+  if (rows.length === 0) return null;
+  const totals: UsageTotals = {
+    invocations: 0,
+    compute_facts: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    wall_seconds: 0,
+    cost_usd_estimate: 0,
+    unpriced: 0,
+  };
+  for (const row of rows) {
+    totals.input_tokens += finiteNonNegative(row.input_tokens);
+    totals.output_tokens += finiteNonNegative(row.output_tokens);
+    totals.cache_read_tokens += finiteNonNegative(row.cache_read_tokens);
+    totals.cache_creation_tokens += finiteNonNegative(row.cache_creation_tokens);
+    totals.wall_seconds += finiteNonNegative(row.wall_seconds);
+    totals.cost_usd_estimate += finiteNonNegative(row.cost_usd_estimate);
+  }
+  return {
+    tokensPerMinute: tokensPerMinute(totals, totals.wall_seconds),
+    dollarsPerMinute: dollarsPerMinute(totals, totals.wall_seconds),
+    runs: rows.length,
+  };
 }
 
 const PHASE_STAGE: Record<string, number> = {

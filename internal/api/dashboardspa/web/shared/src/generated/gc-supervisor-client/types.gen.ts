@@ -9410,9 +9410,64 @@ export type UsageBody = {
      */
     today: UsageTotals;
     /**
+     * Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field.
+     */
+    today_by_run?: Array<UsageRunToday> | null;
+    /**
      * RFC3339 time at which the aggregate was built.
      */
     updated_at: string;
+};
+
+export type UsageRunToday = {
+    /**
+     * Prompt-cache creation tokens for the run today.
+     */
+    cache_creation_tokens: number;
+    /**
+     * Prompt-cache read tokens for the run today.
+     */
+    cache_read_tokens: number;
+    /**
+     * Compute (wall-clock) facts for the run today.
+     */
+    compute_facts: number;
+    /**
+     * List-price estimate for the run today.
+     */
+    cost_usd_estimate: number;
+    /**
+     * Prompt tokens for the run today.
+     */
+    input_tokens: number;
+    /**
+     * Model facts (LLM invocations) for the run today.
+     */
+    invocations: number;
+    /**
+     * Completion tokens for the run today.
+     */
+    output_tokens: number;
+    /**
+     * Run id the facts were attributed to.
+     */
+    run: string;
+    /**
+     * Session bead id first seen for the run, when attributed.
+     */
+    session_id?: string;
+    /**
+     * Facts for the run whose price is unknown.
+     */
+    unpriced: number;
+    /**
+     * Compute wall-clock seconds for the run today; the per-run rate basis.
+     */
+    wall_seconds: number;
+    /**
+     * Session (worker) name first seen for the run, when attributed.
+     */
+    worker?: string;
 };
 
 export type UsageSessionRecent = {

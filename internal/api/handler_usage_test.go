@@ -139,15 +139,57 @@ func TestBuildUsageBodySkipsInvalidFactsAndKeepsSessionIDsDistinct(t *testing.T)
 	}
 }
 
+func TestBuildUsageBodyGroupsTodayByRun(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	midnight := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	facts := []usage.Fact{
+		{Kind: usage.KindModel, RunID: "r-a", Worker: "rig/worker-a", SessionID: "s-a", InputTokens: 3000, OutputTokens: 1500, CostUSDEstimate: 0.06, At: now.Add(-time.Hour).UnixMilli(), IdempotencyKey: "a-1"},
+		{Kind: usage.KindModel, RunID: "r-a", Worker: "rig/worker-a", SessionID: "s-a", InputTokens: 1000, OutputTokens: 500, Unpriced: true, At: now.Add(-time.Minute).UnixMilli(), IdempotencyKey: "a-2"},
+		{Kind: usage.KindCompute, RunID: "r-a", Worker: "rig/worker-a", SessionID: "s-a", WallSeconds: 120, At: now.Add(-time.Hour).UnixMilli(), IdempotencyKey: "a-c"},
+		{Kind: usage.KindModel, RunID: "r-b", Worker: "rig/worker-b", SessionID: "s-b", InputTokens: 600, OutputTokens: 300, CostUSDEstimate: 0.03, At: now.Add(-time.Hour).UnixMilli(), IdempotencyKey: "b-1"},
+		{Kind: usage.KindCompute, RunID: "r-b", Worker: "rig/worker-b", SessionID: "s-b", WallSeconds: 60, At: now.Add(-time.Hour).UnixMilli(), IdempotencyKey: "b-c"},
+		// Pre-midnight: inside last_24h but outside today — never in today_by_run.
+		{Kind: usage.KindModel, RunID: "r-a", InputTokens: 9999, At: midnight.Add(-time.Hour).UnixMilli(), IdempotencyKey: "a-old"},
+	}
+
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	if len(body.TodayByRun) != 2 {
+		t.Fatalf("today_by_run = %+v, want 2 runs", body.TodayByRun)
+	}
+	first, second := body.TodayByRun[0], body.TodayByRun[1]
+	if first.Run != "r-a" || second.Run != "r-b" {
+		t.Fatalf("today_by_run order = %q/%q, want r-a/r-b (token volume desc)", first.Run, second.Run)
+	}
+	if first.Invocations != 2 || first.InputTokens != 4000 || first.OutputTokens != 2000 {
+		t.Fatalf("r-a model totals = %+v, want invocations=2 in=4000 out=2000", first)
+	}
+	if first.WallSeconds != 120 || first.ComputeFacts != 1 {
+		t.Fatalf("r-a compute totals = %+v, want wall=120 facts=1", first)
+	}
+	if first.CostUSDEstimate != 0.06 || first.Unpriced != 1 {
+		t.Fatalf("r-a pricing = cost %v unpriced %d, want 0.06/1", first.CostUSDEstimate, first.Unpriced)
+	}
+	if first.Worker != "rig/worker-a" || first.SessionID != "s-a" {
+		t.Fatalf("r-a attribution = %+v, want worker rig/worker-a session s-a", first)
+	}
+	if second.Invocations != 1 || second.WallSeconds != 60 || second.CostUSDEstimate != 0.03 {
+		t.Fatalf("r-b = %+v, want invocations=1 wall=60 cost=0.03", second)
+	}
+}
+
 func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	state := newFakeState(t)
 	state.usageSink = usage.NewLocalSink(filepath.Join(state.cityPath, ".gc", "usage.jsonl"))
 	now := time.Now()
 	writeUsageLog(t, state.cityPath,
 		"{malformed\n"+usageLine(t, usage.Fact{
-			Kind: usage.KindModel, Worker: "rig/worker", SessionID: "session-1",
+			Kind: usage.KindModel, RunID: "run-1", Worker: "rig/worker", SessionID: "session-1",
 			InputTokens: 100, OutputTokens: 25, CostUSDEstimate: 0.10,
 			At: now.UnixMilli(), IdempotencyKey: "fact-1",
+		})+"\n"+usageLine(t, usage.Fact{
+			Kind: usage.KindCompute, RunID: "run-1", Worker: "rig/worker", SessionID: "session-1",
+			WallSeconds: 60,
+			At:          now.UnixMilli(), IdempotencyKey: "fact-2",
 		})+"\n")
 
 	h := newTestCityHandler(t, state)
@@ -172,6 +214,12 @@ func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	if len(body.RecentBySession) != 1 || body.RecentBySession[0].SessionID != "session-1" {
 		t.Fatalf("default usage response lost its session breakdown: %+v", body.RecentBySession)
 	}
+	if len(body.TodayByRun) != 1 || body.TodayByRun[0].Run != "run-1" {
+		t.Fatalf("default usage response lost its per-run breakdown: %+v", body.TodayByRun)
+	}
+	if body.TodayByRun[0].InputTokens != 100 || body.TodayByRun[0].WallSeconds != 60 {
+		t.Fatalf("per-run row = %+v, want input_tokens=100 wall_seconds=60", body.TodayByRun[0])
+	}
 	if !body.Available || !body.Recording || body.Source != UsageSourceLocalEstimate {
 		t.Fatalf("availability provenance = %+v", body)
 	}
@@ -180,11 +228,11 @@ func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	}
 }
 
-func TestHandleUsageAggregateOnlyOmitsSessionBreakdown(t *testing.T) {
+func TestHandleUsageAggregateOnlyOmitsBreakdowns(t *testing.T) {
 	state := newFakeState(t)
 	state.usageSink = usage.NewLocalSink(filepath.Join(state.cityPath, ".gc", "usage.jsonl"))
 	writeUsageLog(t, state.cityPath, usageLine(t, usage.Fact{
-		Kind: usage.KindModel, Worker: "private-worker", SessionID: "private-session",
+		Kind: usage.KindModel, RunID: "private-run", Worker: "private-worker", SessionID: "private-session",
 		InputTokens: 100, At: time.Now().UnixMilli(), IdempotencyKey: "fact-1",
 	})+"\n")
 	h := newTestCityHandler(t, state)
@@ -199,8 +247,8 @@ func TestHandleUsageAggregateOnlyOmitsSessionBreakdown(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "private-worker") || strings.Contains(rec.Body.String(), "private-session") {
-		t.Fatalf("aggregate response leaked per-session identity: %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "private-worker") || strings.Contains(rec.Body.String(), "private-session") || strings.Contains(rec.Body.String(), "private-run") {
+		t.Fatalf("aggregate response leaked per-run identity: %s", rec.Body.String())
 	}
 	var body UsageBody
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
@@ -211,6 +259,9 @@ func TestHandleUsageAggregateOnlyOmitsSessionBreakdown(t *testing.T) {
 	}
 	if len(body.RecentBySession) != 0 {
 		t.Fatalf("recent_by_session = %+v, want empty", body.RecentBySession)
+	}
+	if len(body.TodayByRun) != 0 {
+		t.Fatalf("today_by_run = %+v, want empty", body.TodayByRun)
 	}
 }
 

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { RunLane } from 'gas-city-dashboard-shared';
+import type { UsageRunToday } from 'gas-city-dashboard-shared/gc-supervisor';
 import {
+  aggregateRunRates,
   burnPerHour,
+  dollarsPerMinute,
   laneToRing,
   pipelineSegments,
   pipelineWidths,
@@ -64,6 +67,50 @@ describe('cockpit telemetry derivation', () => {
         Number.MIN_VALUE,
       ),
     ).toBeNull();
+  });
+
+  it('derives dollars per minute on the same basis as burn per hour', () => {
+    const totals = {
+      invocations: 1,
+      compute_facts: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 0,
+      cost_usd_estimate: 3,
+      unpriced: 0,
+    };
+    expect(dollarsPerMinute(totals, 60)).toBe(3);
+    expect(dollarsPerMinute(totals, 30)).toBe(6);
+    expect(dollarsPerMinute(totals, 0)).toBeNull();
+    expect(dollarsPerMinute({ ...totals, cost_usd_estimate: -1 }, 60)).toBeNull();
+  });
+
+  it('aggregates per-run rows into combined rates over summed wall-clock', () => {
+    const row = (overrides: Partial<UsageRunToday>): UsageRunToday => ({
+      run: 'gc-1',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 1200,
+      output_tokens: 600,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.06,
+      unpriced: 0,
+      ...overrides,
+    });
+    expect(aggregateRunRates([])).toBeNull();
+    expect(aggregateRunRates([row({}), row({ run: 'gc-2' })])).toEqual({
+      tokensPerMinute: 1800,
+      dollarsPerMinute: 0.06,
+      runs: 2,
+    });
+    const noWall = aggregateRunRates([row({ wall_seconds: 0 })]);
+    expect(noWall?.runs).toBe(1);
+    expect(noWall?.tokensPerMinute).toBeNull();
+    expect(noWall?.dollarsPerMinute).toBeNull();
   });
 
   it('carries each lane real stage total and retry provenance', () => {

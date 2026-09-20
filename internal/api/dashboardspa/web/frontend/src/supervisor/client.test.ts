@@ -217,7 +217,7 @@ describe('supervisor client wrapper', () => {
       status_counts: { active: 1 },
     });
     expect(fetchSpy.mock.calls.map((call) => requestedUrl(call[0]))).toEqual([
-      'http://gc-supervisor.test/v0/city/test-city/usage?aggregate_only=true',
+      'http://gc-supervisor.test/v0/city/test-city/usage',
       'http://gc-supervisor.test/v0/city/test-city/runs/census',
     ]);
   });

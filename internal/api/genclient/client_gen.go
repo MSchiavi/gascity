@@ -8694,12 +8694,54 @@ type UsageBody struct {
 	Source UsageBodySource `json:"source"`
 	Today  UsageTotals     `json:"today"`
 
+	// TodayByRun Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field.
+	TodayByRun *[]UsageRunToday `json:"today_by_run,omitempty"`
+
 	// UpdatedAt RFC3339 time at which the aggregate was built.
 	UpdatedAt string `json:"updated_at"`
 }
 
 // UsageBodySource Source of this usage reading.
 type UsageBodySource string
+
+// UsageRunToday defines model for UsageRunToday.
+type UsageRunToday struct {
+	// CacheCreationTokens Prompt-cache creation tokens for the run today.
+	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+
+	// CacheReadTokens Prompt-cache read tokens for the run today.
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+
+	// ComputeFacts Compute (wall-clock) facts for the run today.
+	ComputeFacts int64 `json:"compute_facts"`
+
+	// CostUsdEstimate List-price estimate for the run today.
+	CostUsdEstimate float64 `json:"cost_usd_estimate"`
+
+	// InputTokens Prompt tokens for the run today.
+	InputTokens int64 `json:"input_tokens"`
+
+	// Invocations Model facts (LLM invocations) for the run today.
+	Invocations int64 `json:"invocations"`
+
+	// OutputTokens Completion tokens for the run today.
+	OutputTokens int64 `json:"output_tokens"`
+
+	// Run Run id the facts were attributed to.
+	Run string `json:"run"`
+
+	// SessionId Session bead id first seen for the run, when attributed.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// Unpriced Facts for the run whose price is unknown.
+	Unpriced int64 `json:"unpriced"`
+
+	// WallSeconds Compute wall-clock seconds for the run today; the per-run rate basis.
+	WallSeconds float64 `json:"wall_seconds"`
+
+	// Worker Session (worker) name first seen for the run, when attributed.
+	Worker *string `json:"worker,omitempty"`
+}
 
 // UsageSessionRecent defines model for UsageSessionRecent.
 type UsageSessionRecent struct {

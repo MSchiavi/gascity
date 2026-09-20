@@ -19,6 +19,7 @@ const (
 	usageRecentWindow = 5 * time.Minute
 	usageReadMaxBytes = 16 << 20
 	usageBySessionCap = 24
+	usageByRunCap     = 24
 	usageCacheMaxAge  = 10 * time.Second
 )
 
@@ -53,6 +54,25 @@ type UsageSessionRecent struct {
 	Unpriced            int     `json:"unpriced" doc:"Facts in this window whose price is unknown."`
 }
 
+// UsageRunToday is one run's usage inside the today window. It mirrors the
+// gc costs per-run grouping (model token volume plus compute wall-clock) so
+// the dashboard can render per-run tokens/min and dollars/min with the run's
+// own wall_seconds as the rate basis.
+type UsageRunToday struct {
+	Run                 string  `json:"run" doc:"Run id the facts were attributed to."`
+	Worker              string  `json:"worker,omitempty" doc:"Session (worker) name first seen for the run, when attributed."`
+	SessionID           string  `json:"session_id,omitempty" doc:"Session bead id first seen for the run, when attributed."`
+	Invocations         int     `json:"invocations" doc:"Model facts (LLM invocations) for the run today."`
+	ComputeFacts        int     `json:"compute_facts" doc:"Compute (wall-clock) facts for the run today."`
+	InputTokens         int     `json:"input_tokens" doc:"Prompt tokens for the run today."`
+	OutputTokens        int     `json:"output_tokens" doc:"Completion tokens for the run today."`
+	CacheReadTokens     int     `json:"cache_read_tokens" doc:"Prompt-cache read tokens for the run today."`
+	CacheCreationTokens int     `json:"cache_creation_tokens" doc:"Prompt-cache creation tokens for the run today."`
+	WallSeconds         float64 `json:"wall_seconds" doc:"Compute wall-clock seconds for the run today; the per-run rate basis."`
+	CostUSDEstimate     float64 `json:"cost_usd_estimate" doc:"List-price estimate for the run today."`
+	Unpriced            int     `json:"unpriced" doc:"Facts for the run whose price is unknown."`
+}
+
 // UsageSource identifies whether the response reflects the local estimate log.
 type UsageSource string
 
@@ -77,6 +97,7 @@ type UsageBody struct {
 	Last24H          *UsageTotals         `json:"last_24h,omitempty" doc:"Usage over the trailing 24 hours; a rolling window that survives the local-midnight reset of today. Omitted by servers or proxies that predate the field."`
 	Recent           UsageTotals          `json:"recent" doc:"Usage in the trailing recent window."`
 	RecentBySession  []UsageSessionRecent `json:"recent_by_session,omitempty" doc:"Recent model usage per session, largest token volume first."`
+	TodayByRun       []UsageRunToday      `json:"today_by_run,omitempty" doc:"Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field."`
 	RecentWindowSecs int                  `json:"recent_window_secs" doc:"Length of the recent window in seconds."`
 	ObservedFrom     string               `json:"observed_from,omitempty" doc:"RFC3339 timestamp of the oldest fact included in this bounded read."`
 	UpdatedAt        string               `json:"updated_at" doc:"RFC3339 time at which the aggregate was built."`
@@ -114,6 +135,7 @@ func (s *Server) humaHandleUsage(_ context.Context, input *UsageInput) (*UsageOu
 func usageResponse(body UsageBody, aggregateOnly bool) UsageBody {
 	if aggregateOnly {
 		body.RecentBySession = nil
+		body.TodayByRun = nil
 	}
 	return body
 }
@@ -149,6 +171,12 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		totals    usage.Totals
 	}
 	bySession := make(map[string]*sessionAccum)
+	type runAccum struct {
+		worker    string
+		sessionID string
+		totals    usage.Totals
+	}
+	byRun := make(map[string]*runAccum)
 	var today, last24h, recent usage.Totals
 	var oldest time.Time
 	invalid := 0
@@ -171,6 +199,18 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		}
 		if !at.Before(midnight) && !at.After(now) {
 			today.Add(fact)
+			acc := byRun[fact.RunID]
+			if acc == nil {
+				acc = &runAccum{}
+				byRun[fact.RunID] = acc
+			}
+			if acc.worker == "" {
+				acc.worker = strings.TrimSpace(fact.Worker)
+			}
+			if acc.sessionID == "" {
+				acc.sessionID = strings.TrimSpace(fact.SessionID)
+			}
+			acc.totals.Add(fact)
 		}
 		if at.Before(recentFrom) || at.After(now) {
 			continue
@@ -228,6 +268,33 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 	if len(body.RecentBySession) > usageBySessionCap {
 		body.RecentBySession = body.RecentBySession[:usageBySessionCap]
 	}
+	for run, acc := range byRun {
+		body.TodayByRun = append(body.TodayByRun, UsageRunToday{
+			Run:                 run,
+			Worker:              acc.worker,
+			SessionID:           acc.sessionID,
+			Invocations:         acc.totals.Invocations,
+			ComputeFacts:        acc.totals.ComputeFacts,
+			InputTokens:         acc.totals.InputTokens,
+			OutputTokens:        acc.totals.OutputTokens,
+			CacheReadTokens:     acc.totals.CacheReadTokens,
+			CacheCreationTokens: acc.totals.CacheCreationTokens,
+			WallSeconds:         acc.totals.WallSeconds,
+			CostUSDEstimate:     acc.totals.CostUSDEstimate,
+			Unpriced:            acc.totals.Unpriced,
+		})
+	}
+	slices.SortFunc(body.TodayByRun, func(a, b UsageRunToday) int {
+		aTokens := tokenVolume(a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheCreationTokens)
+		bTokens := tokenVolume(b.InputTokens, b.OutputTokens, b.CacheReadTokens, b.CacheCreationTokens)
+		if aTokens != bTokens {
+			return cmp.Compare(bTokens, aTokens)
+		}
+		return strings.Compare(a.Run, b.Run)
+	})
+	if len(body.TodayByRun) > usageByRunCap {
+		body.TodayByRun = body.TodayByRun[:usageByRunCap]
+	}
 	return body
 }
 
@@ -251,8 +318,12 @@ func validUsageFact(fact usage.Fact, now time.Time) bool {
 }
 
 func usageSessionTokens(session UsageSessionRecent) int {
+	return tokenVolume(session.InputTokens, session.OutputTokens, session.CacheReadTokens, session.CacheCreationTokens)
+}
+
+func tokenVolume(input, output, cacheRead, cacheCreation int) int {
 	total := 0
-	for _, value := range []int{session.InputTokens, session.OutputTokens, session.CacheReadTokens, session.CacheCreationTokens} {
+	for _, value := range []int{input, output, cacheRead, cacheCreation} {
 		if value > math.MaxInt-total {
 			return math.MaxInt
 		}

@@ -5,6 +5,7 @@ import type {
   RunsCensusOutputBody,
   StatusBody,
   UsageBody,
+  UsageRunToday,
   UsageTotals,
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { activeCityOrThrow, getActiveCity } from '../api/cityBase';
@@ -22,12 +23,16 @@ import {
   type LampState,
 } from '../components/cockpit/Instruments';
 import {
+  aggregateRunRates,
   burnPerHour,
+  dollarsPerMinute,
   laneToRing,
   pipelineSegments,
   tokensPerMinute,
+  type AggregateRunRates,
 } from '../components/cockpit/model';
 import { PageHeader } from '../components/PageHeader';
+import { Table, type TableColumn } from '../components/Table';
 import { useCachedData } from '../hooks/useCachedData';
 import { useRunSummary } from '../runs/runSummarySubscription';
 import { SUPERVISOR_REQUEST_TIMEOUT_MS, supervisorApi } from '../supervisor/client';
@@ -130,6 +135,11 @@ export function CockpitHomePage() {
           : null;
   const recentTokens = rateWindow ? tokensPerMinute(rateWindow.totals, rateWindow.seconds) : null;
   const recentBurn = rateWindow ? burnPerHour(rateWindow.totals, rateWindow.seconds) : null;
+  // Per-run rows are absent (not merely empty) on servers that predate the
+  // today_by_run field — render unavailable there, an empty table when today
+  // has no runs, and the rate table otherwise.
+  const runRows = usageAvailable ? (usage.today_by_run ?? null) : null;
+  const runAggregate = runRows === null ? null : aggregateRunRates(runRows);
   const activeSessionsFromStatus = status?.session_counts_detail?.active;
   const activeSessions =
     activeSessionsFromStatus ??
@@ -406,6 +416,27 @@ export function CockpitHomePage() {
         {usageNote && <InstrumentNote>{usageNote}</InstrumentNote>}
       </section>
 
+      <section className="mb-8" aria-labelledby="run-rates-title">
+        <h2 id="run-rates-title" className="mb-2 text-label uppercase tracking-wider text-fg-faint">
+          run rates · today
+        </h2>
+        {runRows === null ? (
+          <InstrumentNote>{usageNote ?? 'run rates unavailable'}</InstrumentNote>
+        ) : (
+          <>
+            <Table
+              columns={RUN_RATE_COLUMNS}
+              rows={runRows}
+              rowKey={(row) => row.run}
+              empty="no runs recorded today"
+            />
+            {runAggregate !== null && (
+              <InstrumentNote>{formatRunAggregate(runAggregate)}</InstrumentNote>
+            )}
+          </>
+        )}
+      </section>
+
       <section className="mb-8" aria-labelledby="run-state-title">
         <h2 id="run-state-title" className="mb-2 text-label uppercase tracking-wider text-fg-faint">
           runs in flight · canonical state
@@ -584,6 +615,76 @@ function connectionLabel(state: string): string {
     default:
       return 'disconnected';
   }
+}
+
+function runTokenTotal(row: UsageRunToday): number {
+  return row.input_tokens + row.output_tokens + row.cache_read_tokens + row.cache_creation_tokens;
+}
+
+const RUN_RATE_COLUMNS: ReadonlyArray<TableColumn<UsageRunToday>> = [
+  { key: 'run', label: 'run', render: (row) => row.run },
+  {
+    key: 'tokens-per-min',
+    label: 'tokens / min',
+    align: 'right',
+    sortable: true,
+    sortValue: (row) => tokensPerMinute(row, row.wall_seconds),
+    render: (row) => {
+      const rate = tokensPerMinute(row, row.wall_seconds);
+      return rate === null ? '—' : formatCompact(rate);
+    },
+  },
+  {
+    key: 'dollars-per-min',
+    label: '$ / min',
+    align: 'right',
+    sortable: true,
+    sortValue: (row) => dollarsPerMinute(row, row.wall_seconds),
+    render: (row) => {
+      const rate = dollarsPerMinute(row, row.wall_seconds);
+      return rate === null ? '—' : formatUsd(rate);
+    },
+  },
+  {
+    key: 'tokens',
+    label: 'tokens',
+    align: 'right',
+    sortable: true,
+    sortValue: (row) => runTokenTotal(row),
+    render: (row) => formatCompact(runTokenTotal(row)),
+  },
+  {
+    key: 'cost',
+    label: 'est. cost',
+    align: 'right',
+    sortable: true,
+    sortValue: (row) => row.cost_usd_estimate,
+    render: (row) => formatUsd(row.cost_usd_estimate),
+  },
+  {
+    key: 'wall',
+    label: 'wall',
+    align: 'right',
+    sortable: true,
+    sortValue: (row) => row.wall_seconds,
+    render: (row) => formatWall(row.wall_seconds),
+  },
+];
+
+function formatRunAggregate(aggregate: AggregateRunRates): string {
+  const tokens =
+    aggregate.tokensPerMinute === null ? '—' : `${formatCompact(aggregate.tokensPerMinute)}/min`;
+  const dollars =
+    aggregate.dollarsPerMinute === null ? '—' : `${formatUsd(aggregate.dollarsPerMinute)}/min`;
+  const runs = `${aggregate.runs} run${aggregate.runs === 1 ? '' : 's'}`;
+  return `aggregate · ${runs} · ${tokens} · ${dollars}`;
+}
+
+function formatWall(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 function formatCount(value: number | null | undefined): string {

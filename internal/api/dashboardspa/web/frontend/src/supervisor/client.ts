@@ -236,11 +236,12 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
       );
     },
     cityUsage(cityName) {
+      // No aggregate_only: the cockpit home renders the per-run breakdown
+      // (today_by_run) alongside the aggregates, and it is the only caller.
       return unwrapSupervisorResult<UsageBody>(
         getV0CityByCityNameUsage({
           client,
           path: { cityName },
-          query: { aggregate_only: true },
         }) as Promise<SupervisorResult<UsageBody>>,
         'gc supervisor usage response was empty',
       );

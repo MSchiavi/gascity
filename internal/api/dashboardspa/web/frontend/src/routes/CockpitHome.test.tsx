@@ -275,6 +275,63 @@ describe('<CockpitHomePage>', () => {
     expect(screen.getByRole('status', { name: 'est. cost: $1.49' })).toBeTruthy();
   });
 
+  it('renders per-run tokens/min and dollars/min with an aggregate caption', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run: [
+        {
+          run: 'gc-a',
+          worker: 'rig/worker-a',
+          session_id: 's-a',
+          invocations: 2,
+          compute_facts: 1,
+          input_tokens: 3000,
+          output_tokens: 1500,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          wall_seconds: 90,
+          cost_usd_estimate: 0.06,
+          unpriced: 0,
+        },
+        {
+          run: 'gc-b',
+          invocations: 1,
+          compute_facts: 1,
+          input_tokens: 600,
+          output_tokens: 300,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          wall_seconds: 45,
+          cost_usd_estimate: 0.09,
+          unpriced: 0,
+        },
+      ],
+    });
+
+    render(router(<CockpitHomePage />));
+
+    expect(await screen.findByRole('heading', { name: 'run rates · today' })).toBeTruthy();
+    // gc-a: 4500 tokens over 90s wall = 3K/min at $0.04/min.
+    expect(screen.getByRole('cell', { name: 'gc-a' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: '3K' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: '$0.04' })).toBeTruthy();
+    // gc-b: 900 tokens over 45s wall = 1.2K/min at $0.12/min.
+    expect(screen.getByRole('cell', { name: 'gc-b' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: '1.2K' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: '$0.12' })).toBeTruthy();
+    expect(screen.getByText('aggregate · 2 runs · 2.4K/min · $0.07/min')).toBeTruthy();
+  });
+
+  it('marks run rates unavailable when the server predates the per-run field', async () => {
+    // The default mock carries no today_by_run, matching a server or proxy
+    // that predates the field: the section must degrade, never throw.
+    render(router(<CockpitHomePage />));
+
+    expect(await screen.findByRole('heading', { name: 'run rates · today' })).toBeTruthy();
+    expect(screen.getByText('run rates unavailable')).toBeTruthy();
+  });
+
   it('labels the last-24h tiles unavailable when usage cannot be read', async () => {
     mocks.cityUsage.mockRejectedValue(new Error('usage down'));
 

@@ -25241,6 +25241,16 @@
             "$ref": "#/components/schemas/UsageTotals",
             "description": "Usage since local midnight on the supervisor host."
           },
+          "today_by_run": {
+            "description": "Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field.",
+            "items": {
+              "$ref": "#/components/schemas/UsageRunToday"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "updated_at": {
             "description": "RFC3339 time at which the aggregate was built.",
             "type": "string"
@@ -25254,6 +25264,81 @@
           "recent",
           "recent_window_secs",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "UsageRunToday": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_creation_tokens": {
+            "description": "Prompt-cache creation tokens for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "Prompt-cache read tokens for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "compute_facts": {
+            "description": "Compute (wall-clock) facts for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cost_usd_estimate": {
+            "description": "List-price estimate for the run today.",
+            "format": "double",
+            "type": "number"
+          },
+          "input_tokens": {
+            "description": "Prompt tokens for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "invocations": {
+            "description": "Model facts (LLM invocations) for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "description": "Completion tokens for the run today.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "run": {
+            "description": "Run id the facts were attributed to.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead id first seen for the run, when attributed.",
+            "type": "string"
+          },
+          "unpriced": {
+            "description": "Facts for the run whose price is unknown.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "wall_seconds": {
+            "description": "Compute wall-clock seconds for the run today; the per-run rate basis.",
+            "format": "double",
+            "type": "number"
+          },
+          "worker": {
+            "description": "Session (worker) name first seen for the run, when attributed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run",
+          "invocations",
+          "compute_facts",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens",
+          "wall_seconds",
+          "cost_usd_estimate",
+          "unpriced"
         ],
         "type": "object"
       },
