@@ -314,6 +314,13 @@ run_fan_out() {
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
+  # Jobs run under a NON-login shell (gcy-6nb): this allowlist passes
+  # through the parent PATH, already proven to resolve a working go, and
+  # a login shell would re-source login profiles that reorder PATH,
+  # resolving a stale go1.17 that rejects go.mod and blocking every push
+  # with Go changes. The parent proved its PATH via the go env probes at
+  # startup, and BASH_ENV is unset in the scrubbed env, so a non-login
+  # shell honors that proven PATH exactly with no profile sourced at all.
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -347,7 +354,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?

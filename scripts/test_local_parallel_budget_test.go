@@ -133,9 +133,23 @@ func TestLocalParallelWithholdsTimeoutFromIntegrationJobs(t *testing.T) {
 	}
 }
 
+// TestLocalParallelNeverSpawnsJobsThroughLoginShell guards gcy-6nb: the
+// fan-out worker ran each jobspec via `bash -lc`, and the login shell
+// re-sources the user's profiles — which reorder PATH and resolved a stale
+// go1.17.6 (/usr/local/go/bin ahead of Homebrew go1.26.x) that rejects
+// go.mod, blocking every push with Go changes town-wide. The per-job `env
+// -i` allowlist already passes the parent's proven PATH through, so jobs
+// must run under a non-login shell that honors it exactly.
+func TestLocalParallelNeverSpawnsJobsThroughLoginShell(t *testing.T) {
+	script := localParallelScript(t)
+	if match := regexp.MustCompile(`bash\s+(-l\b|-lc\b|--login\b)`).FindString(script); match != "" {
+		t.Fatalf("jobs must not run through a login shell (gcy-6nb): found %q — the login shell re-sources profiles, reorders PATH, and can resolve a stale go", match)
+	}
+}
+
 // perJobEnvAllowlist captures the variable allowlist the worker shell passes
 // through `env -i` before invoking each jobspec.
-var perJobEnvAllowlist = regexp.MustCompile(`(?s)env -i \\(.*?)bash -lc`)
+var perJobEnvAllowlist = regexp.MustCompile(`(?s)env -i \\(.*?)bash -c`)
 
 // unitCoreJobCommand returns the `go test` command line the unit-core jobspec
 // hands to each worker shell, with the script's own shell variables resolved.
