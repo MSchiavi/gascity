@@ -463,7 +463,8 @@ Before considering any task complete:
   machines where sharding is useful)
 - Broader process/integration coverage uses the sharded targets documented in
   `TESTING.md` instead of one monolithic `go test ./...` sweep
-- `go vet ./...` clean
+- `make vet` clean — not bare `go vet`: only the Makefile exports the
+  keg-only icu4c CGO flags macOS builds need (see `TESTING.md`)
 - `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
   and has run for the staged change. See "Git hook ownership" below — beads'
   installer silently takes `core.hooksPath` over, and a bypassed hook cannot

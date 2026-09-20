@@ -675,6 +675,28 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
+### macOS: keg-only icu4c and bare `go` commands
+
+`internal/worker` (and anything importing it) transitively needs ICU headers
+through Dolt's `go-icu-regex` CGO dependency. Homebrew installs icu4c
+keg-only, so its headers and libs are not on the compiler's default path.
+Every `make` target exports the right `CGO_CPPFLAGS`/`CGO_LDFLAGS`
+automatically (see the top of the `Makefile`), which is why the documented
+gates are `make vet` / `make test-*` rather than bare `go` commands.
+
+Bare `go build`, `go vet`, and `go test` do not see the Makefile exports, so
+on a Mac they fail with `fatal error: 'unicode/regex.h' file not found` for
+any package in the `internal/worker` chain. If you prefer bare `go` commands
+(e.g. focused `go test` runs), persist the flags once with the unversioned
+brew prefix — it survives icu4c upgrades:
+
+```bash
+go env -w CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c/include \
+  CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c/lib
+```
+
+Linux hosts find system ICU (`libicu-dev`) normally and need none of this.
+
 The `productmetrics_testhook` profile is a required, path-gated CI lane with
 six named owners, including the real CLI re-exec process contract. Its tagged
 process owner is intentionally absent from ordinary untagged `cmd/gc` shard
