@@ -18,7 +18,7 @@ function mkAgent(state: string, overrides: Partial<AgentResponse> = {}): AgentRe
   return {
     name: `agent-${state}`,
     available: true,
-    running: state === 'active' || state === 'running',
+    running: state === 'active' || state === 'running' || state === 'working',
     suspended: false,
     pack_derived: false,
     state,
@@ -27,15 +27,22 @@ function mkAgent(state: string, overrides: Partial<AgentResponse> = {}): AgentRe
 }
 
 describe('isRunningAgent', () => {
-  it('treats active/running agents as running', () => {
+  it('treats active/running/working agents as running', () => {
     expect(isRunningAgent(mkAgent('active'))).toBe(true);
     expect(isRunningAgent(mkAgent('running'))).toBe(true);
+    expect(isRunningAgent(mkAgent('working'))).toBe(true);
   });
 
-  it('treats idle/asleep/detached agents as not running by default', () => {
+  it('treats standby/asleep/detached agents as not running by default', () => {
     expect(isRunningAgent(mkAgent('asleep'))).toBe(false);
-    expect(isRunningAgent(mkAgent('idle'))).toBe(false);
+    expect(isRunningAgent(mkAgent('standby'))).toBe(false);
     expect(isRunningAgent(mkAgent('detached'))).toBe(false);
+  });
+
+  it('counts a standby agent with a live session as running', () => {
+    // Always-on crew agents sit at state=standby with the running flag set.
+    // The 'running' toggle keys on the flag too, so they stay visible.
+    expect(isRunningAgent(mkAgent('standby', { running: true }))).toBe(true);
   });
 
   it('counts a detached-but-live process (running flag set) as running', () => {
@@ -61,7 +68,7 @@ describe('isVisibleUnderRunning', () => {
   it('excludes a suspended agent under the running filter even with a watch item', () => {
     // Regression: /home/ds/gas-city/city-infra-polecat was suspended=true,
     // running=false, state=suspended, yet showed under 'running'. The registry
-    // raises a passive 'watch' (idle) item for suspended agents; keying the
+    // raises a passive 'watch' (standby) item for suspended agents; keying the
     // carve-out on any-non-null severity kept it visible. Only 'attention'
     // should bypass the filter.
     const suspended = mkAgent('suspended', { suspended: true, running: false });
@@ -100,10 +107,16 @@ describe('agentRowLabel', () => {
 
 describe('stateTone', () => {
   it('classifies detached agents explicitly (not via default fallthrough)', () => {
-    // Detached is paused-alive — same neutral palette as idle/asleep, but the
+    // Detached is paused-alive — same neutral palette as standby/asleep, but the
     // case is explicit so a reviewer sees the intent rather than a silent
     // default. See gascity-dashboard-x4k for context.
     expect(stateTone('detached')).toBe('neutral');
+  });
+
+  it('classifies standby agents explicitly as neutral', () => {
+    // Standby is running-but-unassigned (always-on crew between patrols) —
+    // ambient roster state, not a warning.
+    expect(stateTone('standby')).toBe('neutral');
   });
 
   it('falls through to neutral for unknown states', () => {
@@ -116,7 +129,7 @@ describe('stateTone', () => {
 });
 
 describe('buildAgentSynopsis', () => {
-  it('reports detached agents as a distinct count, not bucketed under idle', () => {
+  it('reports detached agents as a distinct count, not bucketed under standby', () => {
     const rows: AgentResponse[] = [
       mkAgent('active'),
       mkAgent('asleep'),
@@ -125,8 +138,15 @@ describe('buildAgentSynopsis', () => {
     ];
     const synopsis = buildAgentSynopsis(rows);
     expect(synopsis).toContain('1 active');
-    expect(synopsis).toContain('2 idle');
+    expect(synopsis).toContain('2 standby');
     expect(synopsis).toContain('1 detached');
+  });
+
+  it('buckets working agents under active and standby agents under standby', () => {
+    const rows: AgentResponse[] = [mkAgent('working'), mkAgent('standby', { running: true })];
+    const synopsis = buildAgentSynopsis(rows);
+    expect(synopsis).toContain('1 active');
+    expect(synopsis).toContain('1 standby');
   });
 
   it('omits detached from the synopsis when there are no detached agents', () => {

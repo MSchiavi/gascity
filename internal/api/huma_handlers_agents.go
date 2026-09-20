@@ -200,7 +200,6 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 			if wantPeek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
@@ -208,9 +207,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
+			// Enrich before computing state: the turn activity feeds
+			// computeAgentState so patrol work without a bead reads "working".
 			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
+			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, resp.Activity)
 
 			agents = append(agents, resp)
 		}
@@ -340,11 +342,13 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		}
 	}
 	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
+	// Enrich before computing state: the turn activity feeds
+	// computeAgentState so patrol work without a bead reads "working".
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
 	}
+	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, resp.Activity)
 
 	return &IndexOutput[agentResponse]{
 		Index: s.latestIndex(),

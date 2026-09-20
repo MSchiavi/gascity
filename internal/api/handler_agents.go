@@ -435,7 +435,11 @@ func resolveProviderInfo(agentProvider string, cfg *config.City) (provider, disp
 }
 
 // computeAgentState derives the state enum from existing agent data.
-func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
+// activity is the session turn state ("in-turn", "idle", or "") from TailMeta.
+// A running agent with no active bead but an in-progress turn is doing
+// patrol/order work, so it reads "working"; a running agent with neither
+// reads "standby", not "idle", so operators don't read it as stuck.
+func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time, activity string) string {
 	if suspended {
 		return "suspended"
 	}
@@ -451,7 +455,10 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 		}
 		return "waiting"
 	}
-	return "idle"
+	if activity == "in-turn" {
+		return "working"
+	}
+	return "standby"
 }
 
 // enrichSessionMeta populates model and context usage fields on the agent

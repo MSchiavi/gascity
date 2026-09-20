@@ -10,7 +10,7 @@ import type { AgentResponse } from '../generated/gc-supervisor-client/index.js';
 
 // gascity-dashboard-2j8e.4: the single agents "needs you" selector. Both the
 // Agents nav badge and the /agents page read it, so the badge count and the
-// page count cannot disagree. Actively-running, idle, asleep, and suspended
+// page count cannot disagree. Actively-running, standby, asleep, and suspended
 // agents are ambient roster state, never counted.
 
 function agent(overrides: Partial<AgentResponse>): AgentResponse {
@@ -27,14 +27,14 @@ function agent(overrides: Partial<AgentResponse>): AgentResponse {
 const liveSession = { attached: true, last_activity: '2026-06-01T11:59:00.000Z', name: 'agent' };
 
 describe('selectAgentsNeedingYou', () => {
-  test('does NOT count actively-running, idle, asleep, or suspended agents', () => {
+  test('does NOT count actively-running, standby, asleep, or suspended agents', () => {
     const result = selectAgentsNeedingYou(
       [
         agent({ name: 'running', running: true, state: 'active', session: liveSession }),
-        agent({ name: 'idle', state: 'idle', session: liveSession }),
+        agent({ name: 'standby', state: 'standby', session: liveSession }),
         agent({ name: 'asleep', running: true, state: 'asleep', session: liveSession }),
         agent({ name: 'suspended', suspended: true, state: 'active', session: liveSession }),
-        agent({ name: 'unavailable', available: false, state: 'idle' }),
+        agent({ name: 'unavailable', available: false, state: 'standby' }),
       ],
       [],
     );

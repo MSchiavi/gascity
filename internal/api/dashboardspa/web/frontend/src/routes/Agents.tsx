@@ -58,8 +58,9 @@ import { agentSlug } from '../hooks/sessionSlug';
 // persisted chip state.
 
 // An agent is "actively running" when it is not suspended and the
-// supervisor reports it as alive (state active/running, or running flag
-// set on a detached-but-live process). The default view shows only these.
+// supervisor reports it as alive (state active/running/working, or running
+// flag set on a detached-but-live process). The default view shows only
+// these. Standby crew agents carry the running flag, so they stay visible.
 export function isRunningAgent(a: SupervisorAgent): boolean {
   return !a.suspended && (a.state === 'active' || a.state === 'running' || a.running === true);
 }
@@ -67,7 +68,7 @@ export function isRunningAgent(a: SupervisorAgent): boolean {
 // Whether an agent is visible while the 'running' toggle is on. Running agents
 // always show; a non-running agent shows ONLY if it has an urgent ('attention')
 // item (e.g. blocked on a pending interaction) so a genuinely stuck agent is
-// never hidden. A passive 'watch' item (suspended / asleep / idle) does NOT
+// never hidden. A passive 'watch' item (suspended / asleep / standby) does NOT
 // keep a non-running agent visible — keying on any-non-null severity is what
 // let a suspended=true agent leak through the 'running' filter.
 export function isVisibleUnderRunning(
@@ -241,7 +242,7 @@ export function AgentsPage() {
       if (rigFilter !== '' && agentProject(a).label !== rigFilter) return false;
       // Only 'attention' severity (e.g. blocked on a pending interaction)
       // bypasses the 'running' filter, never a passive 'watch' (suspended /
-      // asleep / idle). Keying on any-non-null severity is what let a
+      // asleep / standby). Keying on any-non-null severity is what let a
       // suspended=true agent leak through the toggle. See isVisibleUnderRunning.
       const severity = resourceAttentionSeverity(attention, 'agents', a.name);
       if (runningOnly && !isVisibleUnderRunning(a, severity)) return false;
@@ -483,7 +484,7 @@ export function AgentsPage() {
       />
 
       {/* The bottom roster is the "available agents" view — the mayor, PLs, and
-          dispatchers that are running-but-idle, distinct from the working
+          dispatchers that are running-but-standby, distinct from the working
           sessions above. A calm section header (matching the "Workers active"
           style) keeps the two groups from bleeding into one. */}
       <header className="flex items-baseline justify-between border-b border-rule pb-2 mb-4">
@@ -665,11 +666,11 @@ async function copyAttachCommand(
 export { stateTone } from '../components/StatusBadge';
 
 // Buckets a raw state into the synopsis category. Distinct from
-// stateTone because 'detached' and 'idle' share a tone (neutral) but the
+// stateTone because 'detached' and 'standby' share a tone (neutral) but the
 // header text breaks them out.
 export type SynopsisBucket =
   | 'active'
-  | 'idle'
+  | 'standby'
   | 'detached'
   | 'rate-limited'
   | 'stuck'
@@ -680,6 +681,7 @@ function stateBucket(agent: SupervisorAgent): SynopsisBucket {
   switch (agent.state) {
     case 'active':
     case 'running':
+    case 'working':
       return 'active';
     case 'detached':
       return 'detached';
@@ -693,7 +695,7 @@ function stateBucket(agent: SupervisorAgent): SynopsisBucket {
     case 'stuck':
       return 'stuck';
     default:
-      return 'idle';
+      return 'standby';
   }
 }
 
@@ -706,13 +708,13 @@ export function buildAgentSynopsis(rows: ReadonlyArray<SupervisorAgent>): string
   }
   const parts: string[] = [];
   const active = counts.get('active') ?? 0;
-  const idle = counts.get('idle') ?? 0;
+  const standby = counts.get('standby') ?? 0;
   const detached = counts.get('detached') ?? 0;
   const rateLimited = counts.get('rate-limited') ?? 0;
   const stuck = counts.get('stuck') ?? 0;
   const suspended = counts.get('suspended') ?? 0;
   if (active > 0) parts.push(`${active} active`);
-  if (idle > 0) parts.push(`${idle} idle`);
+  if (standby > 0) parts.push(`${standby} standby`);
   if (detached > 0) parts.push(`${detached} detached`);
   if (rateLimited > 0) parts.push(`${rateLimited} rate-limited`);
   if (stuck > 0) parts.push(`${stuck} stuck`);

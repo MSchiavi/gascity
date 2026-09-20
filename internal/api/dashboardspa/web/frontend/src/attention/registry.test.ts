@@ -568,14 +568,14 @@ describe('createAttentionContributors', () => {
     );
   });
 
-  it('does not count actively-running, idle, asleep, or suspended agents', () => {
+  it('does not count actively-running, standby, asleep, or suspended agents', () => {
     const model = composeAttention(
       createAttentionContributors({
         agents: {
           items: [
             agent({ name: 'running', running: true, state: 'active', session: liveSession }),
             agent({ name: 'asleep', running: true, state: 'asleep', session: liveSession }),
-            agent({ name: 'idle', state: 'idle', session: liveSession }),
+            agent({ name: 'standby', state: 'standby', session: liveSession }),
             agent({ name: 'suspended', suspended: true, state: 'active', session: liveSession }),
           ],
         },

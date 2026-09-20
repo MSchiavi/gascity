@@ -1009,11 +1009,11 @@ func TestAgentStateEnum(t *testing.T) {
 			wantState: "stopped",
 		},
 		{
-			name: "idle",
+			name: "standby",
 			setup: func(s *fakeState) {
 				s.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 			},
-			wantState: "idle",
+			wantState: "standby",
 		},
 		{
 			name: "suspended",
@@ -1176,6 +1176,69 @@ func TestAgentActivityFromSessionLog(t *testing.T) {
 	}
 }
 
+func TestAgentStateFromTurnActivity(t *testing.T) {
+	tests := []struct {
+		name      string
+		jsonl     string
+		wantState string
+	}{
+		{
+			name:      "in-turn without bead reads working",
+			jsonl:     `{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","stop_reason":"tool_use","content":[{"type":"tool_use"}],"usage":{"input_tokens":10000}}}` + "\n",
+			wantState: "working",
+		},
+		{
+			name:      "finished turn without bead reads standby",
+			jsonl:     `{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10000}}}` + "\n",
+			wantState: "standby",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.cfg.Workspace.Provider = "claude"
+			state.cfg.Agents = []config.Agent{
+				{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
+			}
+			state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
+			state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+
+			searchDir := t.TempDir()
+			slug := sessionlog.ProjectSlug("/tmp/myrig")
+			slugDir := filepath.Join(searchDir, slug)
+			if err := os.MkdirAll(slugDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sessionFile := filepath.Join(slugDir, "test-session.jsonl")
+			if err := os.WriteFile(sessionFile, []byte(tt.jsonl), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			srv := New(state)
+			srv.sessionLogSearchPaths = []string{searchDir}
+			h := newTestCityHandlerWith(t, state, srv)
+
+			req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+
+			var resp agentResponse
+			json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+			if resp.ActiveBead != "" {
+				t.Fatalf("ActiveBead = %q, want none (fixture must hold no bead)", resp.ActiveBead)
+			}
+			if resp.State != tt.wantState {
+				t.Errorf("State = %q, want %q", resp.State, tt.wantState)
+			}
+		})
+	}
+}
+
 func TestResolveProviderInfo(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Provider: "claude"},
@@ -1219,20 +1282,24 @@ func TestComputeAgentState(t *testing.T) {
 		running     bool
 		activeBead  string
 		lastAct     *time.Time
+		activity    string
 		want        string
 	}{
-		{"suspended", true, false, true, "", nil, "suspended"},
-		{"quarantined", false, true, false, "", nil, "quarantined"},
-		{"stopped", false, false, false, "", nil, "stopped"},
-		{"idle", false, false, true, "", nil, "idle"},
-		{"working", false, false, true, "bead-1", now, "working"},
-		{"waiting", false, false, true, "bead-1", old, "waiting"},
-		{"working-no-activity", false, false, true, "bead-1", nil, "waiting"},
+		{"suspended", true, false, true, "", nil, "", "suspended"},
+		{"quarantined", false, true, false, "", nil, "", "quarantined"},
+		{"stopped", false, false, false, "", nil, "", "stopped"},
+		{"standby", false, false, true, "", nil, "", "standby"},
+		{"standby-turn-idle", false, false, true, "", nil, "idle", "standby"},
+		{"working", false, false, true, "bead-1", now, "", "working"},
+		{"waiting", false, false, true, "bead-1", old, "", "waiting"},
+		{"working-no-activity", false, false, true, "bead-1", nil, "", "waiting"},
+		{"working-patrol-in-turn", false, false, true, "", nil, "in-turn", "working"},
+		{"bead-beats-turn", false, false, true, "bead-1", old, "in-turn", "waiting"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeAgentState(tt.suspended, tt.quarantined, tt.running, tt.activeBead, tt.lastAct)
+			got := computeAgentState(tt.suspended, tt.quarantined, tt.running, tt.activeBead, tt.lastAct, tt.activity)
 			if got != tt.want {
 				t.Errorf("computeAgentState() = %q, want %q", got, tt.want)
 			}

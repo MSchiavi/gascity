@@ -61,7 +61,7 @@ function stubFetch(options: StubFetchOptions = {}) {
                 available: true,
                 running: true,
                 suspended: false,
-                state: 'idle',
+                state: 'standby',
                 display_name: 'Claude (Account 5)',
                 provider: 'claude-5',
                 session: {

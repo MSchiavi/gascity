@@ -360,8 +360,8 @@ function deriveAgentsAttention(facts: AgentsAttentionFacts | undefined): readonl
   // The Agents badge counts agents that NEED THE OPERATOR — exactly the
   // selectAgentsNeedingYou set the /agents page renders, so the badge number and
   // the page's "Needs you" count read one selector and cannot disagree.
-  // Actively-running, idle, asleep, and suspended agents are ambient roster
-  // state, never a badge number.
+  // Actively-running, standby, asleep, and suspended agents are ambient
+  // roster state, never a badge number.
   const pendingSignals = (facts.pendingInteractions ?? []).map((interaction) => ({
     agentName: interaction.agentName,
     ...(interaction.pending.prompt === undefined ? {} : { prompt: interaction.pending.prompt }),

@@ -10,7 +10,7 @@ import type { AgentResponse } from '../generated/gc-supervisor-client/index.js';
 //
 // "Needs you" is the operator-blocking set ONLY: an agent awaiting an input
 // decision, exited in a failure state, throttled by a provider limit, or
-// claiming to run with no live session backing it. Actively-running, idle,
+// claiming to run with no live session backing it. Actively-running, standby,
 // asleep, suspended, and merely-unavailable agents are ambient roster state
 // (surfaced in the page synopsis), never a badge number.
 
