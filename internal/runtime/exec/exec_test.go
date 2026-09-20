@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1538,16 +1539,36 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	// The foreground sleep reports readiness itself: a wrapper earlier in
+	// PATH touches the ready marker, then execs the real sleep in place
+	// (same pid, same process group). Touching the marker from the adapter
+	// shell before forking sleep leaves a window where cancellation's group
+	// signal lands before the child exists; the orphaned sleep then blocks
+	// the shell's rollback trap past the provider's grace and the trap
+	// never runs (load-induced flake). Ready from the child closes it: the
+	// marker is only observable once the signaled pid exists.
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realSleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("resolve real sleep: %v", err)
+	}
+	wrapper := "#!/bin/sh\n: > \"" + readyFile + "\"\nexec \"" + realSleep + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	script := writeScript(t, dir, fmt.Sprintf(`
+PATH="%s:$PATH"
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
     sleep 30
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, binDir, interruptFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
