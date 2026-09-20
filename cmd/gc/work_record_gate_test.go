@@ -195,6 +195,12 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "wr-branch-noproof", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-branch-noproof", "target": "main"}},
+		{ID: "wr-branch-unmerged", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-branch-unmerged", "merged_sha": "abc123", "merged_target": "main"}},
+		{ID: "wr-branch-shipped", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-branch-shipped", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+		{ID: "wr-branch-abandoned", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-branch-abandoned", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeAbandoned}},
+		{ID: "wr-branch-pr", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-branch-pr", "pr_url": "https://github.com/o/r/pull/1", "merged_target": "main"}},
+		{ID: "wr-control-branch", Type: "task", Status: "in_progress", Metadata: map[string]string{"branch": "polecat/wr-control-branch", beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -317,6 +323,33 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 			true,
 			"missing " + beadmeta.WorkOutcomeMetadataKey,
 		},
+		{"branch close without proof blocks even when unenforced", []string{"close", "wr-branch-noproof"}, false, true, "branch-close gate (enforced)"},
+		{"branch close without proof names the missing proof", []string{"close", "wr-branch-noproof"}, true, true, "no merge proof"},
+		{"branch close with unreachable sha blocks unenforced", []string{"close", "wr-branch-unmerged"}, false, true, "not reachable"},
+		{"shipped on a branch without merge proof blocks unenforced", []string{"close", "wr-branch-shipped"}, false, true, "requires merge proof"},
+		{"abandoned with preserved branch passes unenforced", []string{"close", "wr-branch-abandoned"}, false, false, ""},
+		{
+			"pr handoff passes the branch clause but still warns on the missing outcome",
+			[]string{"close", "wr-branch-pr"},
+			false,
+			false,
+			"work-record gate (warn-only)",
+		},
+		{"control bead with branch stays exempt", []string{"close", "wr-control-branch"}, true, false, ""},
+		{
+			"atomic update unsetting branch on abandoned blocks",
+			[]string{"update", "wr-branch-abandoned", "--unset-metadata", "branch", "--status=closed"},
+			false,
+			true,
+			"must preserve the branch pointer",
+		},
+		{
+			"atomic update stamping abandoned on a bare branch passes",
+			[]string{"update", "wr-branch-noproof", "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeAbandoned, "--status=closed"},
+			false,
+			false,
+			"",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,6 +406,43 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("valid atomic shipped close warned: %q", got)
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateBranchMergedProof(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	artifactPath := filepath.Join(repoDir, "artifact.txt")
+	if err := os.WriteFile(artifactPath, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "wr-branch-merged",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: repoDir,
+			"branch":                    "polecat/wr-branch-merged",
+			"merged_sha":                commit,
+			"merged_target":             "main",
+		},
+	}}, nil)
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate([]string{"close", "wr-branch-merged"}, store, nil, workRecordRepoDirs{legacy: repoDir}, false, &stderr); block {
+		t.Fatalf("merged close blocked while unenforced; stderr=%s", stderr.String())
+	}
+	// The refinery merge flow stamps no outcome, so the warn-only clause still
+	// logs its missing-outcome line; the branch clause itself stays silent.
+	if got := stderr.String(); !strings.Contains(got, "work-record gate (warn-only)") {
+		t.Fatalf("expected the warn-only outcome line, got %q", got)
+	} else if strings.Contains(got, "branch-close gate") {
+		t.Fatalf("branch clause should be silent on a merged close, got %q", got)
 	}
 }
 

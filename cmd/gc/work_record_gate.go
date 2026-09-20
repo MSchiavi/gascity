@@ -241,7 +241,9 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // runWorkRecordCloseGate validates every bead a `gc bd close` (or
 // `gc bd update --status=closed`) invocation closes against the work-record
 // contract. Best-effort: it never blocks on its own read failure. Returns
-// whether the close should be blocked (only when enforcement is enabled).
+// whether the close should be blocked: the outcome clause blocks only when
+// enforcement is enabled, while the branch-handoff clause (gcy-49m) blocks
+// proof-less branch closes whatever enforcement says.
 //
 // preOpened and preFetched let a caller that already opened the store and
 // fetched the target beads (e.g. the write-ID collision guard, which reads
@@ -281,6 +283,10 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 // (optional) supplies beads already read by an earlier guard in this same
 // invocation, avoiding a duplicate store.Get for the same ID.
 //
+// It runs two clauses: the warn-only outcome clause (blocked only when enforce
+// is set) and the always-enforced branch-handoff clause (gcy-49m), which
+// refuses a close of branch work without merge proof whatever enforce says.
+//
 // dirs names the checkouts this city knows, and the reachability clause is asked
 // about the one the closing bead's owner points at. When that is nothing the
 // clause degrades to a warning rather than failing closed: the door cannot pose
@@ -308,11 +314,15 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		if !isWorkRecordGatedBead(bead) {
 			continue
 		}
+		stored := bead
 		var projectionErr error
 		bead, projectionErr = applyWorkRecordUpdateMetadata(bead, bdArgs)
+		prospective := bead
 		var violations []string
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
+			// The prospective record is unknowable; judge what can be seen.
+			prospective = stored
 		} else {
 			// The repository is resolved from the PROJECTED bead: an atomic
 			// close may stamp the work directory or the owner in the same
@@ -334,6 +344,23 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
 		}
 		if enforce && len(violations) > 0 {
+			block = true
+		}
+		// The branch-handoff clause (gcy-49m) is always enforced: a close of
+		// branch work without merge proof loses the work itself, so unlike
+		// the outcome clause above it does not wait on the enforce flag.
+		branchViolations := workrecord.ValidateBranchClose(stored, prospective, func(commit, branch string) bool {
+			branchRepoDir := dirs.repoDirFor(prospective)
+			if branchRepoDir == "" {
+				fmt.Fprintf(stderr, "gc bd: branch-close gate (enforced): close of %s: %s\n", id, workrecord.ReachabilityUnverifiedNote) //nolint:errcheck // best-effort stderr
+				return true
+			}
+			return gitCommitReachableOnBranch(branchRepoDir, commit, branch)
+		})
+		for _, v := range branchViolations {
+			fmt.Fprintf(stderr, "gc bd: branch-close gate (enforced): close of %s: %s\n", id, v) //nolint:errcheck // best-effort stderr
+		}
+		if len(branchViolations) > 0 {
 			block = true
 		}
 	}
