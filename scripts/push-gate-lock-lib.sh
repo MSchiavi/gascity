@@ -322,22 +322,37 @@ push_gate_acquire_slot() {
             # decide a slot is taken (ga-rjj9lm).
             _pgl_fd=""
             for (( _pgl_try = PUSH_GATE_FD_BASE; _pgl_try < PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN; _pgl_try++ )); do
-                if ! _push_gate_fd_in_use "$_pgl_try"; then
+                # Skip descriptors this shell already holds: `exec N<>`
+                # on a live N would close it and silently drop that
+                # slot's lock.
+                if _push_gate_fd_in_use "$_pgl_try"; then
+                    continue
+                fi
+                # A closed descriptor is not necessarily an openable one:
+                # bash 3.2 cannot open fds >= 256, so the probe above
+                # reports them as free while `exec` fails. Attempt the
+                # open here and treat failure as "unavailable", staying
+                # on this slot — the old `|| continue` skipped to the
+                # next slot instead, which burned the whole wait bound
+                # and misreported a contention timeout for what is
+                # really an exhausted span (gcy-ds0).
+                if eval "exec ${_pgl_try}<>\"\$_pgl_slot\"" 2>/dev/null; then
                     _pgl_fd="$_pgl_try"
                     break
                 fi
             done
             if [[ -z "$_pgl_fd" ]]; then
-                # Every descriptor in the span is taken, so no slot can be
-                # held no matter how long we wait. Degrade best-effort with a
-                # diagnostic, exactly as the missing-flock and unwritable-dir
-                # paths do — waiting out the bound here would report a
-                # contention timeout for what is not contention.
+                # Every descriptor in the span is taken — or cannot be
+                # opened by this shell at all (bash 3.2 stops at 256) —
+                # so no slot can be held no matter how long we wait.
+                # Degrade best-effort with a diagnostic, exactly as the
+                # missing-flock and unwritable-dir paths do — waiting out
+                # the bound here would report a contention timeout for
+                # what is not contention.
                 echo "push-gate: no free descriptor in [$PUSH_GATE_FD_BASE,$(( PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN - 1 ))] — running without a cross-invocation cap" >&2
                 eval "$_pgl_fd_var="
                 return 0
             fi
-            eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
             if flock -n "$_pgl_fd"; then
                 printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"

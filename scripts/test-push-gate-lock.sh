@@ -182,7 +182,17 @@ FDSPAN_OUT="$(LIB="$LIB" DIR="$WORK/fdspan-slots" ANCHOR="$WORK/fdspan-anchor" \
         . "$LIB"
         : >"$ANCHOR"
         for (( n = PUSH_GATE_FD_BASE; n < PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN; n++ )); do
-            eval "exec $n<>\"\$ANCHOR\"" || { echo SETUP_FAILED; exit 0; }
+            # Stop at the first descriptor this shell cannot open instead
+            # of failing setup: bash 3.2 cannot open fds >= 256, so the
+            # rest of the span is unopenable — which IS the exhausted-span
+            # state under test (the lib must treat those as unavailable
+            # and degrade). A genuinely broken setup (e.g. an unwritable
+            # anchor) still fails loudly: the span stays mostly free, the
+            # acquire below succeeds with a real fd, and the rc=0 fd=[]
+            # assertion fails. On shells without that ceiling the loop
+            # still occupies the whole span, so the assertions below are
+            # unchanged on Linux/bash 5 (gcy-ds0).
+            eval "exec $n<>\"\$ANCHOR\"" 2>/dev/null || break
         done
         z=preset
         push_gate_acquire_slot "$DIR" z holder-H
