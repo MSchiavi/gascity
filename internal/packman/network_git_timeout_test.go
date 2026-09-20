@@ -72,9 +72,13 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	// networkGitTimeout to a few hundred milliseconds, and on a loaded host a
 	// fork/exec can lose that race, so *correct* code would kill the group
 	// before any byte landed and the test would fail waiting for a file that is
-	// never coming. Writing it here removes the race without weakening the
-	// assertion — a shim whose child never starts exits immediately, which
-	// makes the clone succeed, which every caller already fails on.
+	// never coming. Writing it here narrows that race from child-spawn to
+	// shim-exec without weakening the assertion — a shim whose child never
+	// starts exits immediately, which makes the clone succeed, which every
+	// caller already fails on. It does not remove the race entirely: under
+	// enough load the kill can still land before the shim's first write
+	// (gcy-8xl), so the descendants test retries attempts whose shim never
+	// demonstrably started.
 	//
 	// The 50ms cadence is the convention the other users of these helpers use
 	// (internal/orders, cmd/gc): it has to be well under the caller's stability
@@ -87,7 +91,18 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing git shim: %v", err)
 	}
-	t.Setenv("PATH", dir)
+	// Prepend, don't replace: the descendants test calls wedgedGit once per
+	// retry attempt, and a repeat call resolves sleep against the PATH the
+	// previous call installed. Replacing it would leave LookPath searching
+	// a shim dir that holds only git, failing exactly the attempt the retry
+	// exists to save. The newest shim dir stays first, so exec.Command
+	// still resolves git to this attempt's shim while the host PATH
+	// survives underneath for sleep resolution.
+	if old := os.Getenv("PATH"); old != "" {
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+old)
+	} else {
+		t.Setenv("PATH", dir)
+	}
 	// A test that fails before the bound kills the group must not leave the
 	// child running for the rest of the package.
 	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, w.PIDPath) })
