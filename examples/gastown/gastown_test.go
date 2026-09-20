@@ -579,7 +579,10 @@ func TestRefineryFormulaDirectMergeUsesDetachedWorktree(t *testing.T) {
 	}
 
 	assertContainsInOrder(t, direct,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "origin/$TARGET" temp`,
+		`BHRC_STATUS=$?`,
+		`case "$BHRC_STATUS" in`,
+		`1) halt_false_completion "$BRANCH"`,
 		"set -e",
 		`MERGE_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gascity-refinery-merge.XXXXXX")`,
 		`git fetch origin "+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}"`,
@@ -646,14 +649,19 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	)
 
 	// Both terminal handoffs call the shared predicate before closing.
-	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp ||`); count != 2 {
+	// Each call dispatches on the exit status: 0 continues, 1 halts via
+	// halt_false_completion, anything else stops on tool error.
+	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp`); count != 2 {
 		t.Fatalf("expected the guard at both the direct-merge and mr/pr handoff sites, found %d call sites", count)
 	}
 
 	// Direct close-as-merged path: guard precedes the merge and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "direct" (default):**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "origin/$TARGET" temp`,
+		`BHRC_STATUS=$?`,
+		`case "$BHRC_STATUS" in`,
+		`1) halt_false_completion "$BRANCH"`,
 		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
 		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
@@ -661,7 +669,10 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	// mr/pr publication path: guard precedes the push and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "mr":**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "origin/$TARGET" temp`,
+		`BHRC_STATUS=$?`,
+		`case "$BHRC_STATUS" in`,
+		`1) halt_false_completion "$BRANCH"`,
 		"git push origin HEAD:$BRANCH --force-with-lease",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
 	)
@@ -982,27 +993,28 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	body := string(data)
 
 	assertContainsInOrder(t, body,
-		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
-		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
-		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
-		`gc session wake "$REFINERY_TARGET" || true`,
-		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
+		"## FINAL REMINDER: RUN THE FORMULA'S SUBMIT-AND-EXIT",
+		"single source of truth for the",
+		"reassignment, wake/nudge, and drain",
+		"Do NOT run submit-and-exit twice",
+		"ALREADY_SUBMITTED",
 		`gc runtime drain-ack`,
 	)
-	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
-		t.Fatal("polecat prompt must clear gc.routed_to instead of routing to the refinery named session")
+	if strings.Contains(body, "git push origin HEAD") {
+		t.Fatal("polecat prompt must not inline its own done sequence; submit-and-exit owns the push, reassign, wake+nudge, and drain")
 	}
-	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
-		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
+	if !strings.Contains(body, "Run the `mol-polecat-work` `submit-and-exit` step (its single source of truth); if already run, `gc runtime drain-ack` + exit") {
+		t.Fatalf("polecat quick reference must point completion at the submit-and-exit step")
 	}
 }
 
-// TestPolecatPromptHaltsOnAutoPushFalse asserts the done sequence respects
-// mol-pr-from-issue's auto_push=false halt-at-branch-ready contract. The
-// gate must run BEFORE `git push origin HEAD` so a false signal prevents
-// the push and refinery handoff entirely. Regression for gco-ded / gc-m3j:
-// prompt's done sequence was structurally overriding the formula's
-// auto_push gate (BYPASS rate hit 75%).
+// TestPolecatPromptHaltsOnAutoPushFalse asserts the polecat prompt defers
+// mol-pr-from-issue's auto_push=false halt-at-branch-ready contract to the
+// formula's submit-and-exit step instead of inlining its own done sequence.
+// Regression for gco-ded / gc-m3j: the prompt's inlined done sequence was
+// structurally overriding the formula's auto_push gate (BYPASS rate hit
+// 75%). Upstream resolved this by making submit-and-exit the single source
+// of truth; the prompt must not shadow it with its own push.
 func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
 	data, err := os.ReadFile(path)
@@ -1012,28 +1024,13 @@ func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 	body := string(data)
 
 	assertContainsInOrder(t, body,
-		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
-		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
-		`if [ "$AUTO_PUSH" = "false" ]; then`,
-		`BRANCH=$(git branch --show-current)`,
-		`gc bd update <work-bead> \`,
-		`--status=open --assignee=""`,
-		`--set-metadata branch="$BRANCH"`,
-		`--set-metadata target={{ .DefaultBranch }}`,
-		`--set-metadata branch_ready=true`,
-		`--set-metadata halt_reason=auto_push_false`,
-		`--set-metadata gc.routed_to=""`,
-		`gc runtime drain-ack`,
-		"exit 0",
-		"fi",
-		"git push origin HEAD",
-		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
-		`LOCAL_HEAD=$(git rev-parse HEAD)`,
-		`PUSH VERIFICATION FAILED`,
-		`gc runtime drain-ack`,
-		"exit 1",
-		`gc bd update <work-bead> \`,
+		"## FINAL REMINDER: RUN THE FORMULA'S SUBMIT-AND-EXIT",
+		"The `auto_push=false` opt-out (mol-pr-from-issue's halt-at-branch-ready) is",
+		"handled inside submit-and-exit",
 	)
+	if strings.Contains(body, "git push origin HEAD") {
+		t.Fatal("polecat prompt must not inline its own push; submit-and-exit owns the done sequence and its auto_push gate")
+	}
 }
 
 func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
@@ -1045,29 +1042,15 @@ func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
 		"gastown",
 		"gastown.",
 	)
-	doneSequence := sectionBetween(t, body, "### The Done Sequence", "This pushes your branch")
+	doneSequence := sectionBetween(t, body, "### The Done Sequence Lives in the Formula", "Polecats do not push to main")
 
 	assertContainsInOrder(t, doneSequence,
-		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
-		`if [ "$AUTO_PUSH" = "false" ]; then`,
-		`BRANCH=$(git branch --show-current)`,
-		`gc bd update <work-bead> \`,
-		`--status=open --assignee=""`,
-		`--set-metadata branch="$BRANCH"`,
-		`--set-metadata target=main`,
-		`--set-metadata branch_ready=true`,
-		`--set-metadata halt_reason=auto_push_false`,
-		`--set-metadata gc.routed_to=""`,
-		`gc runtime drain-ack`,
-		"exit 0",
-		"fi",
-		"git push origin HEAD",
-		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
-		`LOCAL_HEAD=$(git rev-parse HEAD)`,
-		`PUSH VERIFICATION FAILED`,
-		`gc runtime drain-ack`,
-		"exit 1",
-		`gc bd update <work-bead> \`,
+		"single source of truth for",
+		"Do NOT run submit-and-exit twice",
+		"ALREADY_SUBMITTED",
+		"auto_push=false",
+		"halts at branch-ready",
+		"otherwise it pushes and reassigns to the refinery",
 	)
 }
 
@@ -1880,8 +1863,10 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
 		{"packs/gastown/agents/mayor/prompt.template.md", `${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat`},
 		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`},
-		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
-		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
+		// The polecat prompt and approval-fallacy fragment no longer name
+		// the refinery target: handoff lives in mol-polecat-work's
+		// submit-and-exit step, whose namespaced refinery target the
+		// mol-polecat-work.toml entry above still guards.
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(gastownRel(check.rel))
@@ -2171,10 +2156,12 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
+			// Polecats claim exclusively through `gc hook --claim --json`;
+			// the shared in-progress query would race other polecats.
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-polecat" }}`,
 			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
+			want:   hookClaimJSON,
 			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
@@ -2213,10 +2200,12 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
+			// Polecats claim exclusively through `gc hook --claim --json`;
+			// the shared in-progress query would race other polecats.
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-polecat" }}`,
 			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
+			want:   hookClaimJSON,
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
@@ -2314,8 +2303,9 @@ func TestPolecatStartupUsesHookClaim(t *testing.T) {
 	for _, want := range []string{
 		"gc hook --claim --json",
 		"checks assigned work first",
-		"performs the atomic",
-		"claim before you inspect the bead",
+		"it prints `CLAIMED_BEAD_ID`",
+		"The claim flips gc bd status to `in_progress`",
+		"Never touch a bead id unless it came from",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("%s Startup Protocol missing %q", rel, want)
@@ -2354,14 +2344,8 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 		"packs/gastown/agents/witness/prompt.template.md",
 		"gastown/witness", "witness", "demo", "gastown", "gastown.")
 
-	// Bug 2: no `gc bd` command may filter --type=wisp — it is not a valid bd
-	// issue type, so the query errors and matches nothing (prose warning
-	// against it is fine; an actual command is the bug).
-	for _, line := range strings.Split(rendered, "\n") {
-		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
-			t.Errorf("witness prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
-		}
-	}
+	// Bug 2: no `gc bd` query command may filter --type=wisp.
+	assertNoWispTypeFilter(t, "witness prompt", rendered)
 
 	// Startup work-check: between "## Startup Protocol" and "**Hook ->".
 	startup := sectionBetween(t, rendered, "## Startup Protocol", "**Hook ->")
@@ -2396,6 +2380,45 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 		if !strings.Contains(noIdle, want) {
 			t.Errorf("witness no-idle guard missing %q", want)
 		}
+	}
+}
+
+// assertNoWispTypeFilter is the Bug-2 regression guard (ga-7c6): no `gc bd`
+// query command may filter --type=wisp — it is not a valid bd issue type,
+// so the query errors and matches nothing (and patrols then fail to resolve
+// their current wisp, or pile up duplicates). Prose warning against the
+// flag is fine; an actual command is the bug — so only lines that invoke a
+// gc bd query subcommand alongside the flag trip the guard.
+func assertNoWispTypeFilter(t *testing.T, name, rendered string) {
+	t.Helper()
+	for _, line := range strings.Split(rendered, "\n") {
+		if !strings.Contains(line, "--type=wisp") {
+			continue
+		}
+		if strings.Contains(line, "gc bd list") || strings.Contains(line, "gc bd query") {
+			t.Errorf("%s runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", name, line)
+		}
+	}
+}
+
+// TestPatrolPromptsHaveNoWispTypeFilter extends the Bug-2 guard to the
+// refinery and deacon prompts (gcy-77j): the same invalid --type=wisp
+// filter the witness prompt carried also shipped in their CURRENT_WISP
+// resolution snippets, where it made strict followers stop with "Could
+// not resolve current wisp" instead of burning.
+func TestPatrolPromptsHaveNoWispTypeFilter(t *testing.T) {
+	checks := []struct {
+		rel       string
+		agentName string
+		template  string
+	}{
+		{"packs/gastown/agents/refinery/prompt.template.md", "gastown/refinery", "refinery"},
+		{"packs/gastown/agents/deacon/prompt.template.md", "gastown/deacon", "deacon"},
+	}
+	for _, check := range checks {
+		rendered := renderGastownPromptForPack(t,
+			check.rel, check.agentName, check.template, "demo", "gastown", "gastown.")
+		assertNoWispTypeFilter(t, check.rel, rendered)
 	}
 }
 
@@ -2902,8 +2925,8 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -2993,7 +3016,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3019,7 +3042,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3059,7 +3082,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 	assertContainsInOrder(t, patrolLifecycle,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`fi`,
 		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
@@ -3985,7 +4008,7 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	assertContainsInOrder(t, section,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
