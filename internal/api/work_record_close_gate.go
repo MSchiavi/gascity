@@ -45,7 +45,9 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // gateWorkRecordClose checks a bead the caller is about to close against the
 // work-record contract, returning a 409 when enforcement is on and the record
 // does not satisfy it (nil otherwise — warn-only is the default, so a violation
-// is logged and the close proceeds).
+// is logged and the close proceeds). The branch-handoff clause (gcy-49m) runs
+// inside the same check and is always enforced: a close of branch work without
+// merge proof returns a 409 whatever enforcement says.
 //
 // stored is the row the residency resolver read and store is the store that
 // holds it. submitted carries the metadata of the same request, which the
@@ -118,6 +120,24 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 	}
 	if enforce && len(violations) > 0 {
 		return apierr.ConflictWrongState.Msg("conflict: bead " + id + " does not satisfy the work-record close contract: " + strings.Join(violations, "; "))
+	}
+	// The branch-handoff clause (gcy-49m) is always enforced: a close of
+	// branch work without merge proof loses the work itself, so unlike the
+	// outcome clause above it does not wait on the enforce flag. It shares
+	// the prospective bead and repository the outcome clause already
+	// resolved, and the same degradation when no checkout can be named.
+	branchViolations := workrecord.ValidateBranchClose(stored, prospective, func(commit, branch string) bool {
+		if repoDir == "" {
+			workRecordGateLogf("branch-close gate (enforced): close of %s: %s", id, workrecord.ReachabilityUnverifiedNote)
+			return true
+		}
+		return workRecordCommitReachable(ctx, repoDir, commit, branch)
+	})
+	for _, violation := range branchViolations {
+		workRecordGateLogf("branch-close gate (enforced): close of %s: %s", id, violation)
+	}
+	if len(branchViolations) > 0 {
+		return apierr.ConflictWrongState.Msg("conflict: bead " + id + " does not satisfy the branch-close contract: " + strings.Join(branchViolations, "; "))
 	}
 	return nil
 }

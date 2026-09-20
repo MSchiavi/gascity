@@ -482,6 +482,138 @@ func TestAPIBeadUpdateGateIgnoresNonClosingWrites(t *testing.T) {
 	}
 }
 
+// TestAPIBeadCloseEnforcesBranchClose is the HTTP plane's half of the
+// branch-handoff discipline (gcy-49m): a close of a branch-carrying bead
+// without merge proof refuses with 409 on both close spellings even when the
+// work-record clause is warn-only, or the API becomes the way proof-less
+// closes get done.
+func TestAPIBeadCloseEnforcesBranchClose(t *testing.T) {
+	tests := []struct {
+		name         string
+		meta         map[string]string
+		wantConflict string // substring of the 409 detail; "" ⇒ the close must succeed
+		wantWarn     string // substring of the logged warning; "" ⇒ no warning at all
+	}{
+		{
+			name:         "a branch close without proof refuses unenforced",
+			meta:         map[string]string{"branch": "polecat/wr-branch-1", "target": "main"},
+			wantConflict: "no merge proof",
+			wantWarn:     "branch-close gate (enforced)",
+		},
+		{
+			name: "a branch close with an unreachable sha refuses unenforced",
+			meta: map[string]string{
+				"branch":        "polecat/wr-branch-1",
+				"merged_sha":    "0000000000000000000000000000000000000000",
+				"merged_target": "main",
+			},
+			wantConflict: "not reachable",
+			wantWarn:     "not reachable",
+		},
+		{
+			name:         "shipped on a branch without merge proof refuses unenforced",
+			meta:         map[string]string{"branch": "polecat/wr-branch-1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped},
+			wantConflict: "requires merge proof",
+			wantWarn:     "requires merge proof",
+		},
+		{
+			name: "abandoned with a preserved branch closes clean",
+			meta: map[string]string{"branch": "polecat/wr-branch-1", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeAbandoned},
+		},
+		{
+			name:     "a pr handoff closes clean apart from the warn-only outcome line",
+			meta:     map[string]string{"branch": "polecat/wr-branch-1", "pr_url": "https://github.com/o/r/pull/1", "merged_target": "main"},
+			wantWarn: "work-record gate (warn-only)",
+		},
+		{
+			name: "a control bead with a branch closes untouched",
+			meta: map[string]string{"branch": "polecat/wr-branch-1", beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+		},
+	}
+
+	for _, spelling := range closeSpellings() {
+		for _, tc := range tests {
+			t.Run(spelling.name+"/"+tc.name, func(t *testing.T) {
+				t.Setenv(workrecord.EnforceEnvVar, "")
+				st := newFakeState(t)
+				city := beads.NewMemStore()
+				st.cityBeadStore = city
+				st.stores = nil
+				st.cfg.Rigs = nil
+				id := seedGateBead(t, city, "wr-branch-1", tc.meta)
+				logged := captureWorkRecordGateLog(t)
+
+				s := New(st)
+				err := spelling.close(s, context.Background(), id)
+
+				if tc.wantConflict != "" {
+					assertConflict(t, err, tc.wantConflict)
+				} else if err != nil {
+					t.Fatalf("close: %v (gate log: %s)", err, logged.String())
+				}
+
+				got, getErr := city.Get(id)
+				if getErr != nil {
+					t.Fatalf("Get(%s): %v", id, getErr)
+				}
+				wantStatus := "closed"
+				if tc.wantConflict != "" {
+					wantStatus = "open"
+				}
+				if got.Status != wantStatus {
+					t.Fatalf("status = %q, want %q", got.Status, wantStatus)
+				}
+
+				out := logged.String()
+				if tc.wantWarn == "" {
+					if out != "" {
+						t.Fatalf("expected no gate output, got %q", out)
+					}
+					return
+				}
+				if !strings.Contains(out, tc.wantWarn) {
+					t.Fatalf("gate output %q does not contain %q", out, tc.wantWarn)
+				}
+			})
+		}
+	}
+}
+
+// TestAPIBeadUpdateValidatesTheSubmittedBranchRecord is the atomic-close
+// control for the branch clause: a closing update that stamps the abandoned
+// outcome onto a bare branch in the same request validates the submitted
+// record, not the stored absence.
+func TestAPIBeadUpdateValidatesTheSubmittedBranchRecord(t *testing.T) {
+	t.Setenv(workrecord.EnforceEnvVar, "")
+	st := newFakeState(t)
+	city := beads.NewMemStore()
+	st.cityBeadStore = city
+	st.stores = nil
+	st.cfg.Rigs = nil
+	id := seedGateBead(t, city, "wr-branch-atomic-1", map[string]string{"branch": "polecat/wr-branch-atomic-1"})
+	logged := captureWorkRecordGateLog(t)
+
+	s := New(st)
+	closed := "closed"
+	_, err := s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{
+		Status:   &closed,
+		Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeAbandoned},
+	}})
+	if err != nil {
+		t.Fatalf("atomic stamp-and-close: %v (gate log: %s)", err, logged.String())
+	}
+	if out := logged.String(); out != "" {
+		t.Fatalf("expected no gate output for a submitted valid record, got %q", out)
+	}
+	got, getErr := city.Get(id)
+	if getErr != nil {
+		t.Fatalf("Get(%s): %v", id, getErr)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
 // TestAPIBeadDeleteStaysOutsideTheWorkRecordGate pins a deliberate scope
 // boundary. DELETE on this surface is a soft close, but it means "this bead
 // should not exist", not "this work completed": gating it would make an
