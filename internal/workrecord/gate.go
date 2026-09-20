@@ -11,6 +11,15 @@
 // proceeds — so existing open beads migrate without breakage. Set
 // GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
 //
+// A second clause, the branch-handoff discipline (ValidateBranchClose), is
+// ALWAYS enforced: a gated bead that records branch work (the polecat/refinery
+// branch pointer) must close with merge proof — merged_sha reachable on
+// merged_target, a pull-request handoff pointer with the branch preserved, or
+// an explicit non-shipped outcome with the branch preserved. Warn-only cannot
+// cover this population, because a close that drops branch work without proof
+// loses the work itself: the bead reads done while the branch still awaits
+// merge, or the branch is gone entirely (gcy-49m).
+//
 // # Why this is a package and not a CLI detail
 //
 // A bead closes through more than one per-bead door: `gc bd close` and
