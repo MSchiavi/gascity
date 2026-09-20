@@ -195,6 +195,7 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommand(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCDelegatingShim(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -308,6 +309,12 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	t.Helper()
 
 	env := commandEnvForDir(cityDir, false)
+	// These cities are file-provider by design (decoupled from dolt), and
+	// `gc bd` refuses file-backed stores — so translate the scripts' `gc bd`
+	// calls to the bare `bd` shim that reads the same live store. Anything
+	// other than `gc bd ...` fails closed: the scripts must not silently
+	// run against a different backend than the assertions assume.
+	env = prependGCToBDShim(t, env)
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
 		"GC_BEADS",
@@ -390,6 +397,7 @@ func TestReviewCheckScriptsStripBeadsRoleWarningFromStdout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithWarning(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCDelegatingShim(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -420,6 +428,7 @@ func TestReviewCheckScriptsRetryTransientBeadShowFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithTransientShowFailure(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCDelegatingShim(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -450,6 +459,7 @@ func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithVerdictOutage(t, filepath.Join(fakeDir, "bd"))
+			writeFakeGCDelegatingShim(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -596,6 +606,49 @@ esac
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd command: %v", err)
 	}
+}
+
+// writeFakeGCDelegatingShim installs a fake `gc` beside the fake `bd` in
+// dir. The embedded check scripts invoke beads as `gc bd ...`, so without
+// this shim they would resolve the ambient real gc instead of the fake
+// backend. The shim strips a leading `bd` subcommand and delegates.
+func writeFakeGCDelegatingShim(t *testing.T, dir string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "bd" ]; then
+  shift
+fi
+exec "$(dirname "$0")/bd" "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "gc"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gc shim: %v", err)
+	}
+}
+
+// prependGCToBDShim prepends a shim dir whose `gc` translates `gc bd ...`
+// to bare `bd ...` (which resolves the integration `bd` shim against the
+// same live store). See checkScriptEnv for why the translation exists.
+func prependGCToBDShim(t *testing.T, env []string) []string {
+	t.Helper()
+
+	dir := t.TempDir()
+	script := `#!/bin/sh
+set -eu
+
+if [ "${1:-}" != "bd" ]; then
+  echo "test gc shim: only 'gc bd ...' is supported, got: $*" >&2
+  exit 1
+fi
+shift
+exec bd "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "gc"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write gc-to-bd shim: %v", err)
+	}
+	return replaceEnv(env, "PATH", prependPath(dir, parseEnvList(env)["PATH"]))
 }
 
 func writeFakeBDCommandWithVerdictOutage(t *testing.T, path string) {
