@@ -51,7 +51,7 @@ type SlingOpts struct {
 	SkipPoke      bool
 	Title         string
 	Vars          []string
-	Merge         string // "", "direct", "mr", "local"
+	Merge         string // "", "direct", "mr", "local" — "" falls back to the bead rig's default_merge_strategy
 	NoConvoy      bool
 	Owned         bool
 	Nudge         bool
@@ -255,7 +255,7 @@ func New(deps SlingDeps) (*Sling, error) {
 
 // RouteOpts holds options for plain bead routing.
 type RouteOpts struct {
-	Merge    string // "", "direct", "mr", "local"
+	Merge    string // "", "direct", "mr", "local" — "" falls back to the bead rig's default_merge_strategy
 	NoConvoy bool
 	Owned    bool
 	// Reassign clears any existing human assignee on the bead before routing,
@@ -462,6 +462,27 @@ func SlingDirForBead(cfg *config.City, cityPath, beadID string) string {
 		return dir
 	}
 	return cityPath
+}
+
+// MergeStrategyForBead resolves the merge strategy recorded on a slung bead.
+// An explicit strategy (gc sling --merge, API merge) always wins. When empty,
+// the bead's rig default_merge_strategy applies — the escape hatch for repos
+// whose mainline requires pull requests (gcy-br7). Unknown prefixes, HQ
+// beads, and rigs without a default resolve to "", meaning no metadata is
+// written and the refinery reads the bead as direct.
+func MergeStrategyForBead(cfg *config.City, beadID, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	bp := BeadPrefixForCity(cfg, beadID)
+	if bp == "" {
+		return ""
+	}
+	rig, ok := FindRigByPrefix(cfg, bp)
+	if !ok {
+		return ""
+	}
+	return rig.EffectiveDefaultMergeStrategy()
 }
 
 // BuildSlingCommand replaces {} in the sling query template with the bead ID.

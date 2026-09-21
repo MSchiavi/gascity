@@ -763,6 +763,7 @@ Rig defines an external project registered in the city.
 | `patches` | []AgentOverride |  |  | Patches is the V2 name for rig-level agent overrides. Takes precedence over Overrides if both are set. |
 | `default_sling_target` | string |  |  | DefaultSlingTarget is the agent qualified name used when gc sling is invoked with only a bead ID (no explicit target). Resolved via resolveAgentIdentity. Example: "rig/polecat" |
 | `default_sling_targets` | []string |  |  | DefaultSlingTargets is the plural form of DefaultSlingTarget. When set, targetless gc sling picks one entry at random each dispatch. Takes precedence over DefaultSlingTarget when non-empty. Each entry is resolved the same way as DefaultSlingTarget. Example:   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"] |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the merge strategy recorded on this rig's beads when gc sling runs without an explicit --merge flag (or the API merge field is empty). Set to "mr" for repos whose mainline requires pull requests, so dispatched beads land via MR instead of reaching the refinery as direct and blocking at push. One of "direct", "mr", "local"; empty means no default (merge_strategy stays unset, which the refinery reads as direct). An explicit --merge always wins. Enum: `direct`, `mr`, `local` |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides workspace-level idle sleep defaults for agents in this rig. |
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
 | `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
@@ -778,6 +779,7 @@ RigPatch modifies an existing rig identified by Name.
 | `path` | string |  |  | Path overrides the rig's filesystem path. |
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy overrides the rig's default sling merge strategy. |
 | `suspended` | boolean |  |  | Suspended is the deprecated, pre-runtime-state suspension override. Parsed for backwards compatibility; `gc doctor` surfaces it as a warning and recommends the rename to SuspendedOnStart. No behavioral code path reads it. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |

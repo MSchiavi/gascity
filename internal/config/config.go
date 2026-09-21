@@ -641,6 +641,14 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// DefaultMergeStrategy is the merge strategy recorded on this rig's beads
+	// when gc sling runs without an explicit --merge flag (or the API merge
+	// field is empty). Set to "mr" for repos whose mainline requires pull
+	// requests, so dispatched beads land via MR instead of reaching the
+	// refinery as direct and blocking at push. One of "direct", "mr",
+	// "local"; empty means no default (merge_strategy stays unset, which the
+	// refinery reads as direct). An explicit --merge always wins.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty" jsonschema:"enum=direct,enum=mr,enum=local"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -1196,6 +1204,12 @@ const (
 // (e.g., git symbolic-ref) when this returns "".
 func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
+}
+
+// EffectiveDefaultMergeStrategy returns the rig's default sling merge
+// strategy (see Rig.DefaultMergeStrategy), or "" when none is set.
+func (r *Rig) EffectiveDefaultMergeStrategy() string {
+	return strings.TrimSpace(r.DefaultMergeStrategy)
 }
 
 // EffectiveSuspendedOnStart returns the rig's committable startup
@@ -4406,6 +4420,10 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 
 		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
 			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
+
+		if strategy := r.EffectiveDefaultMergeStrategy(); strategy != "" && strategy != "direct" && strategy != "mr" && strategy != "local" {
+			return fmt.Errorf("rig %q: default_merge_strategy %q must be direct, mr, or local", r.Name, strategy)
 		}
 	}
 	return nil

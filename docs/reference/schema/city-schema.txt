@@ -2660,6 +2660,15 @@
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "enum": [
+            "direct",
+            "mr",
+            "local"
+          ],
+          "description": "DefaultMergeStrategy is the merge strategy recorded on this rig's beads\nwhen gc sling runs without an explicit --merge flag (or the API merge\nfield is empty). Set to \"mr\" for repos whose mainline requires pull\nrequests, so dispatched beads land via MR instead of reaching the\nrefinery as direct and blocking at push. One of \"direct\", \"mr\",\n\"local\"; empty means no default (merge_strategy stays unset, which the\nrefinery reads as direct). An explicit --merge always wins."
+        },
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",
           "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."
@@ -2704,6 +2713,10 @@
         "default_branch": {
           "type": "string",
           "description": "DefaultBranch overrides the rig's recorded mainline branch."
+        },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy overrides the rig's default sling merge strategy."
         },
         "suspended": {
           "type": "boolean",

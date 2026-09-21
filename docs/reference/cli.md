@@ -4517,7 +4517,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
 | `--json` | bool |  | Output dispatch result in JSON format |
-| `--merge` | string |  | merge strategy: direct, mr, or local |
+| `--merge` | string |  | merge strategy: direct, mr, or local (default: bead rig's default_merge_strategy) |
 | `--no-convoy` | bool |  | skip auto-convoy creation |
 | `--no-formula` | bool |  | suppress default formula (route raw bead) |
 | `--nudge` | bool |  | nudge target after routing |
