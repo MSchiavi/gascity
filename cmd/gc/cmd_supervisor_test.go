@@ -4947,10 +4947,13 @@ func TestDoStartRejectsStandaloneOnlyFlagsUnderSupervisor(t *testing.T) {
 
 func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	// Timing assertion below: the file provider keeps provider shutdown
+	// spawn-free. An exec provider's subprocess latency (~250ms cold on a
+	// quiet host, unbounded under fleet load) lands inside the timed
+	// region and would swamp the bound. Stop-op sequencing on this path
+	// stays covered by the non-timing lifecycle tests (e.g.
+	// TestStopManagedCityAllowsForcedShutdownToUnwind).
+	t.Setenv("GC_BEADS", "file")
 
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
@@ -4996,9 +4999,6 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	if !forceStop.Load() {
 		t.Fatal("expected forced cleanup to request force-stop shutdown")
 	}
-
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
 }
 
 func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
@@ -5054,10 +5054,11 @@ func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
 
 func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	// Timing assertion below: the file provider keeps provider shutdown
+	// spawn-free (see TestStopManagedCityForcesCleanupAfterTimeout).
+	// Stop-op sequencing on this path stays covered by the non-timing
+	// lifecycle tests (e.g. TestStopManagedCityAllowsForcedShutdownToUnwind).
+	t.Setenv("GC_BEADS", "file")
 
 	closer := &closerSpy{}
 	mc := &managedCity{
@@ -5095,9 +5096,6 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	if !closer.closed {
 		t.Fatal("expected closer to be closed after forced cleanup")
 	}
-
-	ops := readOpLog(t, logFile)
-	assertSingleStopWithBenignNoise(t, ops)
 }
 
 // hangingListProvider wraps a runtime.Provider but makes ListRunning block
@@ -5114,10 +5112,10 @@ func (hangingListProvider) ListRunning(string) ([]string, error) {
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	// Timing assertion below: the file provider keeps provider shutdown
+	// spawn-free (see TestStopManagedCityForcesCleanupAfterTimeout), so
+	// the grace+forced ceiling the bound below assumes actually holds.
+	t.Setenv("GC_BEADS", "file")
 
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
