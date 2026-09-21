@@ -557,7 +557,11 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	h := newHarness(t, nil)
 	s := h.start()
 	s.send("first prompt")
-	time.Sleep(2500 * time.Millisecond)
+	// Wait for the first turn's marker, not a fixed sleep: the drain closes
+	// before the turn runs, so the marker proves the second prompt cannot
+	// coalesce into the first turn. A fixed 2.5s sleep lost that race under
+	// full-suite load and flaked as "only 1/2 turns completed" (gcy-9kw).
+	s.waitForTurns(1)
 	s.send("second prompt")
 	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
