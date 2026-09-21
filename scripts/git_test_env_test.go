@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,6 +151,16 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 	logDir := t.TempDir()
 	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
 
+	// The worker re-prepends the pinned go bindir inside the login shell
+	// (gcy-a8m); the harness must export it exactly as the live script
+	// does, or the extracted worker fails on the unbound variable under
+	// `set -u` instead of exercising the gitconfig probe.
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("look up go for TEST_LOCAL_GO_BINDIR: %v", err)
+	}
+	goBindir := filepath.Dir(goBin)
+
 	lines := []string{
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
@@ -168,6 +179,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		"export TEST_LOCAL_GOMODCACHE=" + shellQuote(goEnvValue(t, "GOMODCACHE")),
 		"export TEST_LOCAL_GOTMPDIR=" + shellQuote(goEnvValue(t, "GOTMPDIR")),
 		"export TEST_LOCAL_GOROOT=" + shellQuote(goEnvValue(t, "GOROOT")),
+		"export TEST_LOCAL_GO_BINDIR=" + shellQuote(goBindir),
 		"set +e",
 		"run_fan_out",
 		"status=$?",

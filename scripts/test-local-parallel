@@ -120,6 +120,16 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+# Pin the go toolchain before the login-shell hop below (gcy-a8m). Each shard
+# runs under `bash -lc`, and on macOS the login shell rebuilds PATH via
+# path_helper from /etc/paths and /etc/paths.d — which can put a fossil go
+# (e.g. /etc/paths.d/go -> /usr/local/go/bin, go1.17) ahead of the real
+# toolchain no matter what PATH the sanitized `env -i` block carries.
+# Prepending here would not survive that rebuild, so resolve the bindir once
+# from this shell's known-good PATH and re-prepend it *inside* the login
+# shell, after profiles have run (see the worker below). Placed after the
+# `go env` probes so a missing toolchain keeps failing there first.
+go_bindir="$(dirname "$(command -v go)")"
 
 jobspecs=()
 
@@ -263,6 +273,7 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_GO_BINDIR="$go_bindir"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -314,6 +325,11 @@ run_fan_out() {
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
+  # Re-prepend the pinned go bindir inside the login shell (gcy-a8m): the
+  # escaped PATH reference in the -c program expands to the post-profile
+  # PATH of the login shell, so login-provided entries (nvm, etc.) are
+  # preserved and only the go bindir moves to the front. A PATH prefix
+  # applied before the hop would not survive the login shell rebuild.
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -347,7 +363,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -lc "export PATH=\"${TEST_LOCAL_GO_BINDIR}:\$PATH\"; $command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?
