@@ -462,7 +462,16 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
+# Packages for the fast unit sweep — everything except examples/gastown, which
+# runs sharded below so no single test binary approaches the per-package
+# timeout (gcy-98p: the unsharded 250-test binary exceeded 15m on a loaded
+# host). Mirrors MAC_UNIT_PKGS; see test-cover for the same sharding pattern.
+UNIT_TEST_PKGS_NONGASTOWN = $(shell go list ./... | grep -v '/examples/gastown$$')
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
+## examples/gastown is sharded GASTOWN_EXAMPLE_TOTAL (default 4) ways via
+## test-go-test-shard so the suite's largest serial package lands well under
+## the per-package timeout.
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
 ## Bound package parallelism so subprocess-heavy packages do not starve each
@@ -471,7 +480,12 @@ test-ci-policy:
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	scripts/with-push-gate-slot test -- $(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	scripts/with-push-gate-slot test -- $(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_TEST_PKGS_NONGASTOWN)
+
+	@for s in $$(seq 1 $(GASTOWN_EXAMPLE_TOTAL)); do \
+		$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m \
+		./scripts/test-go-test-shard ./examples/gastown "$$s" $(GASTOWN_EXAMPLE_TOTAL) || exit 1; \
+	done
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
 ## the provider's own tier under internal/runtime/herdr, plus the controller's
@@ -554,6 +568,10 @@ CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6
 CMD_GC_COVER_TOTAL ?= 6
 CMD_GC_COVER_SHARD ?= 1
+# Shard count for the examples/gastown loop in `make test` (gcy-98p). Four
+# shards put the ~320s serial suite at ~80s per binary in isolation, leaving
+# wide headroom under the shared 15m budget on a loaded host.
+GASTOWN_EXAMPLE_TOTAL ?= 4
 test-cmd-gc-process-shard:
 	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
 
