@@ -4483,6 +4483,27 @@ func TestRunProviderOp_errorNoStderr(t *testing.T) {
 	}
 }
 
+// TestRunProviderOp_waitDelayAfterExitZeroSucceeds is the regression for
+// gcy-3wn: a provider script that exits 0 while a daemonized descendant
+// holds the stderr pipe open must report success. Go returns
+// exec.ErrWaitDelay in exactly that case (successful exit, pipes closed by
+// the delay), and under host load even a trivial script can trip it when
+// the pipe-EOF wait is starved — failing the op misreports a completed
+// init as failed.
+func TestRunProviderOp_waitDelayAfterExitZeroSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "daemonize.sh")
+	// The background sleep inherits the stderr pipe and holds it well past
+	// the runner's 2s WaitDelay; the script itself exits 0 immediately.
+	content := "#!/bin/sh\nsleep 10 >&2 &\nexit 0\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProviderOp(script, "", "init"); err != nil {
+		t.Fatalf("expected nil for exit 0 with daemonized stdio holder, got %v", err)
+	}
+}
+
 // TestRunProviderOp_setsCityRuntimeEnv verifies city runtime env vars are set in the script env.
 func TestRunProviderOp_setsCityRuntimeEnv(t *testing.T) {
 	dir := t.TempDir()

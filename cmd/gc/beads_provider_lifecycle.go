@@ -2525,6 +2525,13 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("exec beads %s: %w", args[0], ctxErr)
 		}
+		// ErrWaitDelay means the script itself exited successfully and
+		// only the force-closed pipes ended the wait: either a daemonized
+		// descendant holds stdio open, or host load starved the pipe-EOF
+		// wait past the delay. The op completed — report success (gcy-3wn).
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
 			return nil // Not needed
