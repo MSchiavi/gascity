@@ -149,6 +149,7 @@ func TestManagedDoltFirstUserDatabaseFromCSVHandlesEscapedNames(t *testing.T) {
 }
 
 func TestManagedDoltReadOnlyStateNoUserDatabaseIsUnknown(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -192,6 +193,7 @@ esac
 }
 
 func TestManagedDoltHealthCheckNoUserDatabaseIsUnknown(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -239,6 +241,7 @@ esac
 }
 
 func TestManagedDoltResetProbeDropsUserProbeTables(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -443,6 +446,7 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 }
 
 func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	fakeDolt := filepath.Join(binDir, "dolt")

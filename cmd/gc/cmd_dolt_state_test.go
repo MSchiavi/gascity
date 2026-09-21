@@ -1880,6 +1880,7 @@ func TestProcessHasDeletedDataInodesIgnoresDeletedNomsLock(t *testing.T) {
 }
 
 func TestDoltStateQueryProbeCmdUsesDoltHelper(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -1916,6 +1917,7 @@ esac
 }
 
 func TestDoltStateReadOnlyCheckCmdDetectsReadOnly(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -1959,6 +1961,7 @@ esac
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -1990,6 +1993,7 @@ esac
 }
 
 func TestDoltStateReadOnlyCheckCmdNoUserDatabaseReturnsDiagnostic(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -2031,6 +2035,7 @@ esac
 }
 
 func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -2128,6 +2133,7 @@ exit 42
 }
 
 func TestDoltStateHealthCheckCmdReportsReadOnlyAndConnectionCount(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -2193,6 +2199,7 @@ esac
 }
 
 func TestDoltStateHealthCheckCmdNoUserDatabaseReportsUnknown(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -2248,6 +2255,7 @@ esac
 }
 
 func TestDoltStateHealthCheckCmdSkipsReadOnlyAndBestEffortCount(t *testing.T) {
+	relaxManagedDoltSQLTimeoutForTest(t)
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
 	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
@@ -2652,6 +2660,7 @@ func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
 
 func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
+	relaxManagedDoltSQLTimeoutForTest(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -3021,4 +3030,19 @@ func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
 	}
+}
+
+// relaxManagedDoltSQLTimeoutForTest widens the per-invocation dolt spawn
+// bound for tests whose fake dolt exits immediately once scheduled. Under
+// gate load a fork/exec can stall past the 5s production bound (gcy-idx),
+// failing tests whose property under test is the SQL issued, not the
+// bound. The bound itself stays pinned by TestRunManagedDoltSQLTimesOut,
+// which overrides the same variable with a hanging fake. Restored on
+// cleanup; safe because these tests all use t.Setenv and never run in
+// parallel.
+func relaxManagedDoltSQLTimeoutForTest(t *testing.T) {
+	t.Helper()
+	old := managedDoltSQLCommandTimeout
+	managedDoltSQLCommandTimeout = 30 * time.Second
+	t.Cleanup(func() { managedDoltSQLCommandTimeout = old })
 }
