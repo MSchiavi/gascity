@@ -557,6 +557,10 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	h := newHarness(t, nil)
 	s := h.start()
 	s.send("first prompt")
+	// Gate on the first turn completing before the idle gap: a bare sleep
+	// races adapter startup under load, and both prompts already queued when
+	// the first read runs coalesce into one turn.
+	s.waitForTurns(1)
 	time.Sleep(2500 * time.Millisecond)
 	s.send("second prompt")
 	s.waitForTurns(2)
@@ -1097,9 +1101,14 @@ func TestInterruptMidTurnContinuesTheLoop(t *testing.T) {
 	h := newHarness(t, map[string]string{"STUB_SLEEP": "5", "STUB_SID": "sess_int"})
 	s := h.start()
 	s.send("slow turn")
-	time.Sleep(3 * time.Second) // inside the stub's sleep
+	// Wait for the turn to actually start: a fixed sleep races adapter
+	// startup under load, and a SIGINT that lands while idle interrupts
+	// nothing — the turn then completes normally and no error is reported.
+	s.waitForOutput("zcode-repl turn in flight", adapterWaitBudget)
 	s.signal(syscall.SIGINT)
-	time.Sleep(2 * time.Second)
+	// Wait for the interrupted turn to be reported rather than sleeping a
+	// fixed window a loaded box may stretch past.
+	s.waitForOutput("zcode-repl error rc=", adapterWaitBudget)
 
 	if !s.alive() {
 		t.Fatalf("adapter exited on SIGINT; it must absorb it:\n%s", s.output())
@@ -1171,7 +1180,10 @@ func TestInterruptWhileIdleDoesNotExit(t *testing.T) {
 
 	h := newHarness(t, nil)
 	s := h.start()
-	time.Sleep(2 * time.Second) // idle, blocked in read
+	// Wait for the loop to be up before signaling: the INT trap is installed
+	// during startup, and a SIGINT that lands before it kills the shell with
+	// the default disposition instead of testing the idle path.
+	s.waitForOutput("zcode-repl ready", adapterWaitBudget)
 	s.signal(syscall.SIGINT)
 	time.Sleep(2 * time.Second)
 
