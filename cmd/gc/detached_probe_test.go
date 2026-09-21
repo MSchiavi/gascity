@@ -76,6 +76,14 @@ func TestParseDetachedProbeSpec(t *testing.T) {
 	}
 }
 
+// detachedProbeTestMappingTimeout is intentionally generous. The exit-code
+// mapping tests spawn a freshly-written fake tmux per case, and first
+// execution of new script content pays macOS security-scan latency (~1s
+// observed unloaded, worse under sharded-gate load) that races the 1s
+// production default and flakes as timeout-instead-of-mapped-status. The
+// timeout path itself is covered by TestProbeDetachedWork_Timeout.
+const detachedProbeTestMappingTimeout = 30 * time.Second
+
 func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -93,7 +101,7 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
-			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", detachedProbeTestMappingTimeout)
 			if got.Status != tt.wantStatus {
 				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.wantStatus, got.Err)
 			}
@@ -106,6 +114,18 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 				t.Fatalf("tmux args = %q, want %q", string(args), wantArgs)
 			}
 		})
+	}
+}
+
+func TestProbeDetachedWork_SlowExitStillMapsCode(t *testing.T) {
+	// A slow-but-successful spawn must still map by exit code. Fresh
+	// helper scripts pay first-exec scan latency on macOS that can exceed
+	// the 1s production probe budget under gate load (gcy-64w).
+	installFakeTmux(t, "sleep 2; exit 1")
+
+	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", detachedProbeTestMappingTimeout)
+	if got.Status != detachedProbeDead {
+		t.Fatalf("Status = %q, want %q (err=%v)", got.Status, detachedProbeDead, got.Err)
 	}
 }
 
