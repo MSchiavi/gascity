@@ -1758,7 +1758,24 @@ func TestCheckDoltAuthorIdentityReportsProbeErrorsSeparately(t *testing.T) {
 	}
 }
 
+// withGenerousDoltProbeTimeout raises initRunDoltConfigGet's wall-clock probe
+// timeout for the calling test. The 2s production default is tuned for UX (a
+// hung dolt must not stall init), but under full-suite load on an oversubscribed
+// host even spawning a trivial fake dolt can exceed it, flaking tests that
+// assert on stderr content instead of the timeout error. The override is safe
+// because the callers are sequential tests (they use t.Setenv, which forbids
+// t.Parallel): parallel tests in this package stay paused until every
+// sequential test — including its Cleanup restores — has finished, so the
+// override can never overlap with them.
+func withGenerousDoltProbeTimeout(t *testing.T) {
+	t.Helper()
+	old := initRunVersionTimeout
+	initRunVersionTimeout = 30 * time.Second
+	t.Cleanup(func() { initRunVersionTimeout = old })
+}
+
 func TestInitRunDoltConfigGetReportsExitStderrAsProbeError(t *testing.T) {
+	withGenerousDoltProbeTimeout(t)
 	binDir := t.TempDir()
 	doltPath := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\necho 'unreadable global config' >&2\nexit 1\n"), 0o755); err != nil {
@@ -1782,6 +1799,7 @@ func TestInitRunDoltConfigGetReportsExitStderrAsProbeError(t *testing.T) {
 }
 
 func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
+	withGenerousDoltProbeTimeout(t)
 	binDir := t.TempDir()
 	doltPath := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
