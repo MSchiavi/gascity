@@ -3550,10 +3550,32 @@ func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
 
 func TestShellExecRunnerReturnsPartialOutputOnTimeout(t *testing.T) {
 	workDir := t.TempDir()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+
+	// Gate the fixed deadline on exec-path readiness: under gate load,
+	// fork+exec of sh alone can exceed a sub-second budget, which would
+	// leave zero output through no fault of the runner (gcy-3j6). This
+	// instant command returns at once when healthy and proves the exec
+	// path is responsive right now, so the producer below emits its
+	// first byte within microseconds of spawn.
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), hangBudget)
+	defer readyCancel()
+	readyOut, readyErr := shellExecRunner(readyCtx, "printf ready", workDir, nil)
+	if readyErr != nil {
+		t.Fatalf("exec readiness probe: %v", readyErr)
+	}
+	if string(readyOut) != "ready" {
+		t.Fatalf("exec readiness probe output = %q, want %q", readyOut, "ready")
+	}
+
+	// The 5s deadline is a stall tolerance, not a latency assertion: it
+	// must exceed worst-case spawn jitter after readiness (dolt probes
+	// use the same 5s production bound for the same reason). The
+	// producer's first byte precedes any sleep so partial output does
+	// not depend on scheduler promptness after spawn.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	output, err := shellExecRunner(ctx, "while :; do printf .; sleep 0.01; done", workDir, nil)
+	output, err := shellExecRunner(ctx, "printf .; sleep 30", workDir, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
 	}

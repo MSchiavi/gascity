@@ -945,6 +945,14 @@ esac
 exec /bin/date "$@"
 `)
 
+			// Hermetic timeout providers: every fake above exits instantly, so
+			// run_bounded needs no real bound — and resolving a host timeout (or
+			// the python3 fallback) makes probe results depend on host speed
+			// (gcy-3j6). runtime.sh prefers gtimeout, so shadow both names.
+			timeoutMarker := filepath.Join(t.TempDir(), "timeout.marker")
+			writeExecutable(t, filepath.Join(fakeBin, "timeout"), fakeTimeoutShim)
+			writeExecutable(t, filepath.Join(fakeBin, "gtimeout"), fakeTimeoutShim)
+
 			counterFile := filepath.Join(t.TempDir(), "date-counter")
 			cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
 			cmd.Env = append(filteredEnv(
@@ -952,6 +960,7 @@ exec /bin/date "$@"
 				"FAKE_DATE_SECONDS_COUNTER_FILE",
 				"FAKE_DATE_SECONDS_FIRST",
 				"FAKE_DATE_SECONDS_SECOND",
+				"FAKE_TIMEOUT_MARKER",
 				"GC_CITY_PATH",
 				"GC_PACK_DIR",
 				"GC_DOLT_HOST",
@@ -965,6 +974,7 @@ exec /bin/date "$@"
 				"FAKE_DATE_SECONDS_COUNTER_FILE="+counterFile,
 				"FAKE_DATE_SECONDS_FIRST=1776740122",
 				"FAKE_DATE_SECONDS_SECOND=1776740123",
+				"FAKE_TIMEOUT_MARKER="+timeoutMarker,
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
 				"GC_DOLT_HOST=127.0.0.1",
@@ -998,6 +1008,9 @@ exec /bin/date "$@"
 			}
 			if report.Server.LatencyMS != 1000 {
 				t.Fatalf("server.latency_ms = %d, want 1000 to prove seconds fallback ran\n%s", report.Server.LatencyMS, out)
+			}
+			if marker, err := os.ReadFile(timeoutMarker); err != nil || len(marker) == 0 {
+				t.Fatalf("probes did not route through the fake timeout (marker %q missing/empty); probe results must not depend on host timeout providers\n%s", timeoutMarker, out)
 			}
 		})
 	}
@@ -1034,6 +1047,27 @@ func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filena
 	}
 }
 
+// fakeTimeoutShim is a fake coreutils `timeout`/`gtimeout` for hermetic
+// shell tests. It drops the leading --kill-after=N flag and the duration
+// argument, then execs the command directly. Every faked command under
+// test exits instantly, so no real wall-clock bound is needed — and
+// routing through a host timeout provider (or the python3 run_bounded
+// fallback, with interpreter startup per probe) makes probe results
+// depend on host speed and availability, flaking under `make test -p=4`
+// fleet load (gcy-0jh). When FAKE_TIMEOUT_MARKER names a path, each
+// invocation appends a byte so tests can pin that probes routed through
+// the fake rather than a host provider.
+//
+// Only valid for tests whose faked commands exit promptly: a test that
+// relies on real bounding (e.g. an unresponsive-server probe) would hang.
+// Real bounding behavior is covered by runtime_bounded_test.go.
+const fakeTimeoutShim = `#!/bin/sh
+case "$1" in --kill-after=*) shift ;; esac
+shift
+[ -n "${FAKE_TIMEOUT_MARKER:-}" ] && printf . >>"$FAKE_TIMEOUT_MARKER"
+exec "$@"
+`
+
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
@@ -1068,12 +1102,20 @@ func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
 printf '%s\n' "$@" >> "$FAKE_DOLT_ARGS"
 exit 0
 `)
+	// Hermetic timeout providers: every fake above exits instantly, so
+	// run_bounded needs no real bound — and resolving a host timeout (or
+	// the python3 fallback) makes probe results depend on host speed
+	// (gcy-3j6). runtime.sh prefers gtimeout, so shadow both names.
+	timeoutMarker := filepath.Join(t.TempDir(), "timeout.marker")
+	writeExecutable(t, filepath.Join(fakeBin, "timeout"), fakeTimeoutShim)
+	writeExecutable(t, filepath.Join(fakeBin, "gtimeout"), fakeTimeoutShim)
 
 	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
 	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
 		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS",
-		"GC_DOLT_DATA_DIR"),
+		"GC_DOLT_DATA_DIR", "FAKE_TIMEOUT_MARKER"),
 		"GC_CITY_PATH="+cityPath,
+		"FAKE_TIMEOUT_MARKER="+timeoutMarker,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_DATA_DIR="+emptyDataDir,
 		"GC_DOLT_HOST=superlzy-dolt",
@@ -1115,6 +1157,9 @@ exit 0
 		if !strings.Contains(gotArgs, want) {
 			t.Fatalf("fake dolt args missing %q; got:\n%s\nhealth output:\n%s", want, args, out)
 		}
+	}
+	if marker, err := os.ReadFile(timeoutMarker); err != nil || len(marker) == 0 {
+		t.Fatalf("probes did not route through the fake timeout (marker %q missing/empty); probe results must not depend on host timeout providers\n%s", timeoutMarker, out)
 	}
 }
 
