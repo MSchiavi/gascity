@@ -78,7 +78,9 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	// caller already fails on. It does not remove the race entirely: under
 	// enough load the kill can still land before the shim's first write
 	// (gcy-8xl), so the descendants test retries attempts whose shim never
-	// demonstrably started.
+	// demonstrably started, doubling the deadline each time and skipping —
+	// after a leak check over the silent files — if the budget exhausts
+	// with nothing ever scheduled (gcy-e4f).
 	//
 	// The 50ms cadence is the convention the other users of these helpers use
 	// (internal/orders, cmd/gc): it has to be well under the caller's stability

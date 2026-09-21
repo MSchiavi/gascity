@@ -33,14 +33,15 @@ func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 	var wedged wedgedRemote
 
 	// The deadline here is scheduling headroom for the shim, not the bound
-	// under test: a full second for /bin/sh to exec and append one byte.
-	// TestDefaultRunNetworkGitIsBounded pins that the bound tracks a tight
-	// 300ms deadline; this test pins that the kill reaches descendants, a
-	// property independent of the deadline's magnitude. A tight deadline
-	// here only narrows the window the shim has to demonstrably start
-	// before the kill lands (gcy-8xl).
+	// under test: time for /bin/sh to exec and append one byte. It starts at
+	// a second and doubles on every attempt the shim loses to the scheduler,
+	// so a slow host gets a wider window instead of a verdict it cannot
+	// appeal (gcy-e4f). TestDefaultRunNetworkGitIsBounded pins that the bound
+	// tracks a tight 300ms deadline; this test pins that the kill reaches
+	// descendants, a property independent of the deadline's magnitude. A
+	// tight deadline here only narrows the window the shim has to
+	// demonstrably start before the kill lands (gcy-8xl).
 	restore := networkGitTimeout
-	networkGitTimeout = time.Second
 	t.Cleanup(func() { networkGitTimeout = restore })
 	restoreWait := networkGitWaitDelay
 	networkGitWaitDelay = time.Second
@@ -51,19 +52,34 @@ func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 	// heartbeat byte, and then there is no file for WaitForFileSize to find
 	// (gcy-8xl). That is a lost scheduling race, not a leaked descendant, so
 	// an attempt whose shim never demonstrably started is retried with a fresh
-	// shim directory rather than failed — a previous attempt's already-signaled
-	// group cannot append to the file under assertion.
+	// shim directory — a previous attempt's already-signaled group cannot
+	// append to the file under assertion — and a doubled deadline, so each
+	// retry also widens the window the scheduler has to fit the shim into.
 	//
 	// The retry does not weaken the test. The stability assertion below runs
 	// exactly once, on an attempt whose heartbeat landed before the kill, so a
 	// pass still means "heartbeats flowed, then stopped". A genuinely broken
-	// group kill fails every attempt the same way: the final attempt's file
-	// keeps growing past the stability deadline. And requiring the timeout
-	// sentinel on every attempt is strictly stronger than before: previously a
-	// run where the bound never fired but a heartbeat existed (shim dying on
-	// its own) would pass vacuously.
-	const maxAttempts = 3
+	// group kill fails the stability assertion on the first attempt its orphan
+	// gets scheduled in. And requiring the timeout sentinel on every attempt
+	// is strictly stronger than before: previously a run where the bound never
+	// fired but a heartbeat existed (shim dying on its own) would pass
+	// vacuously.
+	//
+	// If even the widest window cannot fit one shim exec, the host is too
+	// loaded to run the experiment at all: no descendant ever demonstrably
+	// existed, so there is nothing whose death could be asserted. That
+	// exhausts to a skip, not a failure (gcy-e4f) — failing would test the
+	// scheduler, not the kill. The skip is gated on a leak check first: a
+	// leaked orphan writes every 50ms whenever it is scheduled, so any growth
+	// in an earlier attempt's file after that attempt ended proves the kill
+	// did not reach it, and that fails. Silence across every attempt's file
+	// is the only shape that skips, and it is the shape a broken kill cannot
+	// produce once any orphan is ever scheduled.
+	deadline := time.Second
+	const maxDeadline = 8 * time.Second
+	var unstarted []string
 	for attempt := 1; ; attempt++ {
+		networkGitTimeout = deadline
 		wedged = wedgedGit(t)
 		_, err := defaultRunNetworkGit("", wedged.URL, "", "clone", "--quiet", wedged.URL, t.TempDir()+"/dest")
 		if err == nil {
@@ -75,10 +91,23 @@ func TestDefaultRunNetworkGitKillsDescendants(t *testing.T) {
 		if info, statErr := os.Stat(wedged.HeartbeatPath); statErr == nil && info.Size() > 0 {
 			break
 		}
-		t.Logf("attempt %d: no heartbeat yet, retrying", attempt)
-		if attempt >= maxAttempts {
-			t.Fatalf("shim wrote no heartbeat in %d attempts (%v); the host cannot start /bin/sh within the %s test deadline", maxAttempts, err, networkGitTimeout)
+		t.Logf("attempt %d: no heartbeat within %s, retrying", attempt, deadline)
+		unstarted = append(unstarted, wedged.HeartbeatPath)
+		if deadline >= maxDeadline {
+			// The last attempt's orphan, if the kill leaked one, has had no
+			// observation window yet — every earlier attempt's file has had
+			// the whole rest of the loop. One second is twenty shim cadences:
+			// any leaked descendant scheduled even once shows itself before
+			// the verdict.
+			time.Sleep(time.Second)
+			for _, path := range unstarted {
+				if info, statErr := os.Stat(path); statErr == nil && info.Size() > 0 {
+					t.Fatalf("heartbeat file %s grew after its attempt's group kill; the deadline did not reach the descendant", path)
+				}
+			}
+			t.Skipf("host could not start /bin/sh within the attempt budget (deadlines %s..%s); no descendant ever demonstrably existed, so the kill has nothing to prove", time.Second, maxDeadline)
 		}
+		deadline *= 2
 	}
 
 	size := processgrouptest.WaitForFileSize(t, wedged.HeartbeatPath)
