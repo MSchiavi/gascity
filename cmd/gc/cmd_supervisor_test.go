@@ -5142,6 +5142,16 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 
 	var stderr bytes.Buffer
 	result := make(chan error, 1)
+	// Warm the beads-provider stop path before starting the timer. The first
+	// exec of the newly created spy script pays hundreds of milliseconds (up
+	// to seconds under load) for first-exec trust evaluation, cached for
+	// later execs of the same file. Without this warm-up that fixture cost
+	// lands inside the timed window and fails the test on overhead, not on
+	// shutdown logic. This test never reads the ops log, so the extra logged
+	// "stop" is unobserved.
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("warm-up shutdownBeadsProvider: %v", err)
+	}
 	start := time.Now()
 	go func() {
 		result <- stopManagedCity(mc, cityPath, &stderr)
