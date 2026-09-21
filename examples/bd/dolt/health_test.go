@@ -1034,6 +1034,27 @@ func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filena
 	}
 }
 
+// fakeTimeoutShim is a fake coreutils `timeout`/`gtimeout` for hermetic
+// shell tests. It drops the leading --kill-after=N flag and the duration
+// argument, then execs the command directly. Every faked command under
+// test exits instantly, so no real wall-clock bound is needed — and
+// routing through a host timeout provider (or the python3 run_bounded
+// fallback, with interpreter startup per probe) makes probe results
+// depend on host speed and availability, flaking under `make test -p=4`
+// fleet load (gcy-0jh). When FAKE_TIMEOUT_MARKER names a path, each
+// invocation appends a byte so tests can pin that probes routed through
+// the fake rather than a host provider.
+//
+// Only valid for tests whose faked commands exit promptly: a test that
+// relies on real bounding (e.g. an unresponsive-server probe) would hang.
+// Real bounding behavior is covered by runtime_bounded_test.go.
+const fakeTimeoutShim = `#!/bin/sh
+case "$1" in --kill-after=*) shift ;; esac
+shift
+[ -n "${FAKE_TIMEOUT_MARKER:-}" ] && printf . >>"$FAKE_TIMEOUT_MARKER"
+exec "$@"
+`
+
 func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
@@ -1159,6 +1180,7 @@ func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
 	root := repoRoot(t)
 	fakeBin := t.TempDir()
 	emptyDataDir := t.TempDir()
+	timeoutMarker := filepath.Join(t.TempDir(), "timeout.marker")
 
 	// Local managed precheck must fail so the external SQL path is taken; the
 	// on-disk data dir is empty, proving databases come from SQL, not the scan.
@@ -1166,13 +1188,21 @@ func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+	// Hermetic timeout providers: every fake above exits instantly, so
+	// run_bounded needs no real bound — and resolving a host timeout (or
+	// the python3 fallback) makes probe results depend on host speed
+	// (gcy-0jh). runtime.sh prefers gtimeout, so shadow both names.
+	writeExecutable(t, filepath.Join(fakeBin, "timeout"), fakeTimeoutShim)
+	writeExecutable(t, filepath.Join(fakeBin, "gtimeout"), fakeTimeoutShim)
 
 	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
 	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR",
+		"FAKE_TIMEOUT_MARKER"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"FAKE_TIMEOUT_MARKER="+timeoutMarker,
 		"GC_DOLT_HOST=superlzy-dolt",
 		"GC_DOLT_PORT=3306",
 		"GC_DOLT_USER=superlzy",
@@ -1230,6 +1260,9 @@ func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
 		if _, ok := got[sys]; ok {
 			t.Fatalf("system database %q leaked into report; SHOW DATABASES system filter failed\n%s", sys, out)
 		}
+	}
+	if marker, err := os.ReadFile(timeoutMarker); err != nil || len(marker) == 0 {
+		t.Fatalf("probes did not route through the fake timeout (marker %q missing/empty); probe results must not depend on host timeout providers\n%s", timeoutMarker, out)
 	}
 }
 
@@ -1322,6 +1355,7 @@ func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
 	root := repoRoot(t)
 	fakeBin := t.TempDir()
 	emptyDataDir := t.TempDir()
+	timeoutMarker := filepath.Join(t.TempDir(), "timeout.marker")
 
 	// Local managed precheck must fail so classification alone decides the path;
 	// the smart fake answers the external SELECT 1 / SHOW DATABASES probes.
@@ -1329,13 +1363,21 @@ func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+	// Hermetic timeout providers: every fake above exits instantly, so
+	// run_bounded needs no real bound — and resolving a host timeout (or
+	// the python3 fallback) makes probe results depend on host speed
+	// (gcy-0jh). runtime.sh prefers gtimeout, so shadow both names.
+	writeExecutable(t, filepath.Join(fakeBin, "timeout"), fakeTimeoutShim)
+	writeExecutable(t, filepath.Join(fakeBin, "gtimeout"), fakeTimeoutShim)
 
 	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
 	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR",
+		"FAKE_TIMEOUT_MARKER"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"FAKE_TIMEOUT_MARKER="+timeoutMarker,
 		"GC_DOLT_HOST=127.0.0.2",
 		"GC_DOLT_PORT=3306",
 		"GC_DOLT_USER=root",
@@ -1367,6 +1409,9 @@ func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
 	}
 	if !report.Server.Reachable {
 		t.Fatalf("server.reachable = false; the fake external endpoint answers SELECT 1\n%s", out)
+	}
+	if marker, err := os.ReadFile(timeoutMarker); err != nil || len(marker) == 0 {
+		t.Fatalf("probes did not route through the fake timeout (marker %q missing/empty); probe results must not depend on host timeout providers\n%s", timeoutMarker, out)
 	}
 }
 
