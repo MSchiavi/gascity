@@ -138,6 +138,18 @@ detect_memory_kib() {
   printf '%s\n' "$best"
 }
 
+# Print the one-minute load from `sysctl -n vm.loadavg` output ("{ 2.73 3.15
+# 3.77 }"). Returns 1 when the output is unparseable.
+parse_sysctl_vm_loadavg() {
+  local raw="$1" first=""
+  first="$(printf '%s' "$raw" | tr -d '{}' | awk '{ print $1; exit }' 2>/dev/null || true)"
+  if [[ "$first" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    printf '%s\n' "$first"
+    return 0
+  fi
+  return 1
+}
+
 detect_loadavg() {
   if [[ -n "${GC_TEST_LOCAL_LOADAVG:-}" ]]; then
     [[ "$GC_TEST_LOCAL_LOADAVG" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
@@ -146,9 +158,35 @@ detect_loadavg() {
     return
   fi
 
+  # Test seam standing in for `sysctl -n vm.loadavg` below: raw sysctl
+  # output text, parsed by the same code path as the live call so the macOS
+  # parser is covered on every OS (gcy-z23). Ranked above the live sources
+  # so setting it is deterministic even on Linux with /proc; the numeric
+  # GC_TEST_LOCAL_LOADAVG override above still wins outright.
+  if [[ -n "${GC_TEST_LOCAL_VM_LOADAVG:-}" ]]; then
+    local seam_parsed=""
+    seam_parsed="$(parse_sysctl_vm_loadavg "$GC_TEST_LOCAL_VM_LOADAVG" || true)"
+    [[ -n "$seam_parsed" ]] ||
+      fail "GC_TEST_LOCAL_VM_LOADAVG must look like sysctl vm.loadavg output ('{ 1.23 1.10 1.01 }')"
+    printf '%s\n' "$seam_parsed"
+    return
+  fi
+
   local loadavg_file="/proc/loadavg"
-  [[ -r "$loadavg_file" ]] || return 1
-  awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
+  if [[ -r "$loadavg_file" ]]; then
+    awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null || return 1
+    return 0
+  fi
+
+  # macOS has no /proc/loadavg; without this fallback load-awareness was
+  # silently skipped on the Mac fleet host, so contended suites kept full
+  # fan-out and crawled (gcy-s4q diagnoses load 21 with no reduction). A
+  # missing or unparseable sysctl degrades to "no load data" rather than
+  # failing the run.
+  local vmload=""
+  vmload="$(sysctl -n vm.loadavg 2>/dev/null || true)"
+  [[ -n "$vmload" ]] || return 1
+  parse_sysctl_vm_loadavg "$vmload" || return 1
 }
 
 cpus="$(detect_cpus)"

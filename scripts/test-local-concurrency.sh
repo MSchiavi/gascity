@@ -20,9 +20,11 @@
 # Coverage: outer-job load subtraction (zero/mid/saturating load), the
 # min_auto_jobs=2 floor, a small machine skipping load adjustment
 # entirely, fractional-load truncation (not rounding), a malformed
-# GC_TEST_LOCAL_LOADAVG failing by name, a live-host regression guard that
-# the default path actually reads /proc/loadavg (skipped when strace is
-# unavailable), inner-parallelism arithmetic (clean division, the real
+# GC_TEST_LOCAL_LOADAVG failing by name, the macOS sysctl vm.loadavg
+# fallback via the GC_TEST_LOCAL_VM_LOADAVG seam (subtraction, fractional
+# truncation, floor, malformed-by-name, numeric-override precedence), a
+# live-host regression guard that the default path actually reads
+# /proc/loadavg (skipped when strace is unavailable), inner-parallelism arithmetic (clean division, the real
 # ga-04m84s repro numbers, job-count-exceeds-outer-jobs, the trivial 1x1
 # case, the GC_TEST_INNER_P override, a malformed GC_TEST_INNER_P failing by
 # name), and the test-local-parallel wiring described above.
@@ -79,8 +81,26 @@ MALFORMED_RC=$?
 assert_true "loadavg.malformed_nonzero_exit" test "$MALFORMED_RC" -ne 0
 assert_contains "loadavg.malformed_names_var" "$MALFORMED_OUT" "GC_TEST_LOCAL_LOADAVG"
 
+GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_VM_LOADAVG='{ 10.50 9.00 8.00 }' "$JOB_COUNT")"
+assert_eq "loadavg.sysctl_vm_loadavg_subtracts" "$GOT" "6"
+
+GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_VM_LOADAVG='{ 3.9 1.0 1.0 }' "$JOB_COUNT")"
+assert_eq "loadavg.sysctl_vm_loadavg_truncates_fractional" "$GOT" "13"
+
+GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_VM_LOADAVG='{ 28.2 20.0 15.0 }' "$JOB_COUNT")"
+assert_eq "loadavg.sysctl_vm_loadavg_floors_at_min" "$GOT" "2"
+
+GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG=0 GC_TEST_LOCAL_VM_LOADAVG='{ 28.0 20.0 15.0 }' "$JOB_COUNT")"
+assert_eq "loadavg.numeric_override_beats_vm_seam" "$GOT" "16"
+
+MALFORMED_VM_OUT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_VM_LOADAVG='bogus' "$JOB_COUNT" 2>&1)"
+MALFORMED_VM_RC=$?
+assert_true "loadavg.sysctl_vm_loadavg_malformed_nonzero_exit" test "$MALFORMED_VM_RC" -ne 0
+assert_contains "loadavg.sysctl_vm_loadavg_malformed_names_var" "$MALFORMED_VM_OUT" "GC_TEST_LOCAL_VM_LOADAVG"
+
 assert_true "loadavg.script_defines_min_auto_jobs_2" grep -qE 'min_auto_jobs=2' "$JOB_COUNT"
 assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$JOB_COUNT"
+assert_true "loadavg.script_references_vm_seam" grep -q 'GC_TEST_LOCAL_VM_LOADAVG' "$JOB_COUNT"
 
 # Regression guard: the default (no-override) path must actually read
 # /proc/loadavg, mirroring how detect_memory_kib is already proven to read
