@@ -627,8 +627,11 @@ make test-local-full-parallel
 
 By default, the local runners bound concurrency by both detected CPUs and
 available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
-If memory cannot be detected, they use three jobs. An explicit override always
-wins:
+If memory cannot be detected, they use three jobs. On machines with more than
+4 CPUs the count is further reduced by the current one-minute load average
+(floored at 2 jobs), read from `/proc/loadavg` on Linux or `sysctl
+vm.loadavg` on macOS, so a suite joining an already-loaded host backs off
+instead of piling on. An explicit override always wins:
 
 ```bash
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
@@ -1000,9 +1003,14 @@ lifetime. The mechanism (`scripts/push-gate-lock-lib.sh`) is adapted from
 `mpr_acquire_global_slot` in the gc-management meta-repo, with one
 deliberate difference: mpr's caller fails fast, but this gate's caller is
 synchronous and human/agent-facing, so on contention it polls with a
-bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
+bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 3600s; polling every
 `PUSH_GATE_POLL_SECONDS`, default 15s), printing an immediate diagnostic
-naming current slot holders the moment it starts waiting. Exhausting the
+naming current slot holders the moment it starts waiting, then reprinting
+elapsed-vs-bound progress every poll cycle so a long gate-wait never reads
+as a stalled push. The default bound exceeds two sequential worst-case
+suites: a queued waiter must outlast both holders, and at the old 600s
+default with 20m+ contended suites every 3rd+ concurrent push timed out
+and retried into the same queue (2026-09-21 incident). Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
