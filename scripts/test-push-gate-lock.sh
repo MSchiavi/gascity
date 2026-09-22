@@ -12,11 +12,13 @@
 # (PUSH_GATE_MAX_WAIT_SECONDS / PUSH_GATE_POLL_SECONDS) to stay fast.
 #
 # Coverage: acquire/hold/deny/release, the bounded wait and its return code,
-# FD inheritance (a detached descendant must not pin a slot), dead-holder
-# diagnostics, the missing-flock degrade path, malformed tunables, the
-# GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
-# slots-dir fallback, and static assertions that scripts/test-local-parallel
-# wires all of it up — including closing the gate FD before the fan-out.
+# the waiter heartbeat (elapsed-vs-bound progress while queued), the default
+# wait bound covering queued contended suites, FD inheritance (a detached
+# descendant must not pin a slot), dead-holder diagnostics, the missing-flock
+# degrade path, malformed tunables, the GC_PUSH_GATE_NO_CAP escape hatch,
+# both city-root resolution modes, the slots-dir fallback, and static
+# assertions that scripts/test-local-parallel wires all of it up — including
+# closing the gate FD before the fan-out.
 
 set -uo pipefail
 
@@ -100,6 +102,26 @@ assert_contains "wait.timeout_message"         "$CHILD_OUT" "timed out"
 assert_contains "wait.eventually_denied"       "$CHILD_OUT" "DENIED"
 assert_true     "wait.elapsed_at_least_bound"  test "$ELAPSED" -ge 2
 assert_eq       "wait.library_returns_1_on_timeout" "$CHILD_RC" "1"
+
+# ---------------- waiter heartbeat: progress while queued, not silence ----------------
+# A waiter that prints nothing between the initial "all slots busy" and the
+# timeout reads as a stalled push — during gcy-s4q agents reported hangs that
+# were really gate waits. Every poll cycle reprints elapsed-vs-bound progress
+# so gate-wait is distinguishable from suite-run and transport.
+HEARTBEAT_OUT="$(LIB="$LIB" DIR="$SLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=3 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-HB; exit "$?"' 2>&1)"
+HEARTBEAT_RC=$?
+assert_contains "wait.heartbeat_shows_elapsed_progress" "$HEARTBEAT_OUT" "still waiting"
+assert_contains "wait.heartbeat_names_bound"            "$HEARTBEAT_OUT" "3s"
+assert_eq       "wait.heartbeat_still_times_out"        "$HEARTBEAT_RC" "1"
+
+# ---------------- default wait bound covers queued contended suites ----------------
+# The 2026-09-21 incident (gcy-s4q → gcy-z23): each contended suite ran 20m+
+# while the default bound was 600s, so any 3rd+ concurrent push exhausted its
+# wait and exited 75, then retried into the same queue. The default must
+# exceed two sequential worst-case suites — a queued waiter outlasts both
+# holders instead of timing out behind them.
+assert_true "defaults.max_wait_covers_queued_suites" grep -q 'PUSH_GATE_MAX_WAIT_SECONDS 3600' "$LIB"
 
 # ---------------- release -> reacquire ----------------
 push_gate_release_slot "$FD0"

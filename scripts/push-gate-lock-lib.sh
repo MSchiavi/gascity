@@ -43,7 +43,9 @@
 #   facing command (a push, or a direct `make` invocation), so instead of
 #   failing instantly it polls with a bounded wait, printing an immediate
 #   diagnostic the moment it starts waiting (FR5) and naming current
-#   holders. Only after the wait bound elapses does it report failure — the
+#   holders, then reprinting elapsed-vs-bound progress every poll cycle so
+#   a long gate-wait never reads as a stalled push. Only after the wait
+#   bound elapses does it report failure — the
 #   caller is expected to map that to `exit 75` (EX_TEMPFAIL), never a bare
 #   `exit 1`, so this is never confused with a real test failure or with
 #   scripts/push-ownership-guard.sh's unrelated exit-1 contract.
@@ -103,7 +105,7 @@
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
-#       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
+#       PUSH_GATE_MAX_WAIT_SECONDS (default 3600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
 #       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
@@ -296,7 +298,11 @@ push_gate_acquire_slot() {
 
     local _pgl_max _pgl_max_wait _pgl_poll
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
-    _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
+    # The bound must exceed TWO sequential worst-case suites, not one: a
+    # queued waiter outlasts both holders before its first sweep can
+    # succeed. At 600s with 20m+ contended suites, every 3rd+ concurrent
+    # push timed out and retried into the same queue (gcy-s4q → gcy-z23).
+    _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 3600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
@@ -357,7 +363,7 @@ push_gate_acquire_slot() {
                 printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"
                 if [[ "$_pgl_announced" -eq 1 ]]; then
-                    echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
+                    echo "push-gate: slot-${_pgl_i} acquired after $(( $(date +%s) - _pgl_start ))s wait" >&2
                 fi
                 return 0
             fi
@@ -368,6 +374,13 @@ push_gate_acquire_slot() {
             _pgl_announced=1
             _pgl_start="$(date +%s)"
             echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
+            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+        else
+            # Heartbeat (gcy-z23): a waiter that prints nothing between the
+            # initial "all slots busy" and the timeout reads as a stalled
+            # push. Reprint elapsed-vs-bound progress every poll so
+            # gate-wait stays distinguishable from suite-run and transport.
+            echo "push-gate: still waiting for a free slot (elapsed $(( $(date +%s) - _pgl_start ))s of ${_pgl_max_wait}s):" >&2
             push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
         fi
 
