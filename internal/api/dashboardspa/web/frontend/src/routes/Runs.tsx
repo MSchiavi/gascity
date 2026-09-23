@@ -78,7 +78,10 @@ export function RunsPage() {
     [attention],
   );
 
-  const canonicalCounts = runCensus.data?.status_counts;
+  const canonicalCounts =
+    !runCensus.loading && runCensus.error === null && runCensus.data?.partial !== true
+      ? runCensus.data?.status_counts
+      : undefined;
   const synopsis = runSynopsis(data, canonicalCounts);
 
   const freshnessLabel = runs
@@ -203,7 +206,7 @@ function runSynopsis(
       ];
       return `${states.join(' · ')}. ${RUN_PHASE_GRAMMAR}`;
     }
-    return `${data.data.totalActive} non-stale runs in flight; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
+    return `${data.data.totalActive} non-stale active lanes; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
   }
 
   return `Run counts unavailable: ${data.error}. ${RUN_PHASE_GRAMMAR}`;

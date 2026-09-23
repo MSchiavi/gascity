@@ -2,20 +2,12 @@
 #
 # test-local-concurrency.sh — unit tests for load-aware outer job counting
 # (scripts/test-local-job-count) and GOFLAGS=-p= inner-test-binary
-# parallelism (scripts/lib/inner-parallelism.sh), plus static assertions
-# that the inner-parallelism piece is wired into scripts/test-local-parallel
-# correctly (ga-04m84s).
+# parallelism (scripts/lib/inner-parallelism.sh).
 #
 # Part A exercises scripts/test-local-job-count as a real subprocess, since
 # its behavior spans multiple detection functions and env-var seams already
 # tested that way. Part B sources scripts/lib/inner-parallelism.sh directly
-# and calls gc_inner_parallelism in-process — the pure-arithmetic half is
-# extracted into a sourceable lib specifically so this self-test (itself one
-# of fast's own jobs) never has to shell out to the real, heavyweight
-# scripts/test-local-parallel end-to-end. Static wiring assertions cover
-# that the lib is actually plumbed into test-local-parallel: sourced,
-# invoked, exported into GOFLAGS, documented in usage(), reported in the
-# per-run echo, and self-tested from both the fast) and full) job lists.
+# and calls gc_inner_parallelism in-process.
 #
 # Coverage: outer-job load subtraction (zero/mid/saturating load), the
 # min_auto_jobs=2 floor, a small machine skipping load adjustment
@@ -25,7 +17,7 @@
 # unavailable), inner-parallelism arithmetic (clean division, the real
 # ga-04m84s repro numbers, job-count-exceeds-outer-jobs, the trivial 1x1
 # case, the GC_TEST_INNER_P override, a malformed GC_TEST_INNER_P failing by
-# name), and the test-local-parallel wiring described above.
+# name), and executable test-local-parallel wiring.
 
 set -uo pipefail
 
@@ -87,9 +79,6 @@ MALFORMED_OUT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" 
 MALFORMED_RC=$?
 assert_true "loadavg.malformed_nonzero_exit" test "$MALFORMED_RC" -ne 0
 assert_contains "loadavg.malformed_names_var" "$MALFORMED_OUT" "GC_TEST_LOCAL_LOADAVG"
-
-assert_true "loadavg.script_defines_min_auto_jobs_2" grep -qE 'min_auto_jobs=2' "$JOB_COUNT"
-assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$JOB_COUNT"
 
 # Regression guard: the default (no-override) path must actually read
 # /proc/loadavg, mirroring how detect_memory_kib is already proven to read
@@ -154,44 +143,39 @@ assert_eq "shared_budget.rounds_down" "$GOT" "1"
 GOT="$(gc_shared_auto_jobs 1 2 2>/dev/null)"
 assert_eq "shared_budget.keeps_one_job" "$GOT" "1"
 
-# ============================================================
-# Static wiring assertions against scripts/test-local-parallel
-# ============================================================
+mkdir -p "$fixture_dir/bin"
+cat > "$fixture_dir/bin/xargs" <<'EOF'
+#!/bin/sh
+cat > "$GC_LOCAL_JOBSPECS"
+while [ "$#" -gt 0 ] && [ "$1" != bash ]; do shift; done
+[ "$#" -gt 0 ] || exit 1
+exec "$@" "probe::$GC_LOCAL_PROBE"
+EOF
+chmod +x "$fixture_dir/bin/xargs"
+cat > "$fixture_dir/probe" <<EOF
+#!/bin/sh
+printf 'GOFLAGS=%s\nGOMAXPROCS=%s\n' "\$GOFLAGS" "\$GOMAXPROCS" > "$fixture_dir/probe.out"
+EOF
+chmod +x "$fixture_dir/probe"
 
-assert_true "wiring.sources_inner_parallelism_lib" grep -q 'lib/inner-parallelism.sh' "$LOCAL_PARALLEL"
-assert_true "wiring.calls_gc_inner_parallelism"     grep -q 'gc_inner_parallelism'     "$LOCAL_PARALLEL"
-assert_true "wiring.exports_goflags_dash_p"         grep -qE 'GOFLAGS=.*-p='           "$LOCAL_PARALLEL"
-assert_true "wiring.usage_mentions_inner_p_seam"    grep -q 'GC_TEST_INNER_P'          "$LOCAL_PARALLEL"
+for mode in fast full; do
+    jobspecs="$fixture_dir/$mode.jobspecs"
+    runner_output="$fixture_dir/$mode.out"
+    PATH="$fixture_dir/bin:$PATH" GC_PUSH_GATE_NO_CAP=1 LOCAL_TEST_JOBS=2 GC_TEST_INNER_P=7 \
+        GO_TEST_TIMEOUT=999h GC_LOCAL_JOBSPECS="$jobspecs" GC_LOCAL_PROBE="$fixture_dir/probe" \
+        "$LOCAL_PARALLEL" "$mode" > "$runner_output" 2>&1
+    runner_rc=$?
+    assert_eq "wiring.$mode.runner_exit" "$runner_rc" "0"
+    if [[ "$runner_rc" -ne 0 ]]; then
+        continue
+    fi
+    tr '\000' '\n' < "$jobspecs" > "$fixture_dir/$mode.jobs"
+    assert_true "wiring.$mode.selftest_job" grep -q '^local-concurrency-selftest::' "$fixture_dir/$mode.jobs"
+    assert_true "wiring.$mode.goflags" grep -q 'GOFLAGS=.*-p=7' "$fixture_dir/probe.out"
+    assert_true "wiring.$mode.gomaxprocs" grep -q '^GOMAXPROCS=7$' "$fixture_dir/probe.out"
+    assert_true "wiring.$mode.output" grep -q 'inner_p=7' "$runner_output"
+done
 
-echo_line="$(grep -n '^echo "Running' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-if [[ -n "$echo_line" ]]; then
-    ECHO_TEXT="$(sed -n "${echo_line}p" "$LOCAL_PARALLEL")"
-    assert_contains "wiring.echo_reports_inner_p" "$ECHO_TEXT" "inner_p="
-else
-    record_fail "wiring.echo_reports_inner_p" "no 'Running ... jobspecs' echo line found in $LOCAL_PARALLEL"
-fi
-
-# add_local_concurrency_selftest_job must be called from inside BOTH the
-# fast) and full) case blocks — line-ranged the same way the push-gate
-# precedent isolates a case block, so a call sitting in some other block (or
-# only one of the two) can't false-positive a bare whole-file grep.
-fast_start="$(grep -n '^  fast)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-fast_end="$(grep -n '^  cmd-gc-process)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-if [[ -n "$fast_start" && -n "$fast_end" ]]; then
-    FAST_BLOCK="$(sed -n "${fast_start},${fast_end}p" "$LOCAL_PARALLEL")"
-    assert_contains "wiring.fast_case_calls_selftest" "$FAST_BLOCK" "add_local_concurrency_selftest_job"
-else
-    record_fail "wiring.fast_case_calls_selftest" "could not locate the fast) case block in $LOCAL_PARALLEL"
-fi
-
-full_start="$(grep -n '^  full)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-full_end="$(grep -n '^  \*)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-if [[ -n "$full_start" && -n "$full_end" ]]; then
-    FULL_BLOCK="$(sed -n "${full_start},${full_end}p" "$LOCAL_PARALLEL")"
-    assert_contains "wiring.full_case_calls_selftest" "$FULL_BLOCK" "add_local_concurrency_selftest_job"
-else
-    record_fail "wiring.full_case_calls_selftest" "could not locate the full) case block in $LOCAL_PARALLEL"
-fi
 
 echo
 echo "local-concurrency tests: $pass passed, $fail failed"

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   GC_EVENT_PREFIX,
@@ -204,6 +204,7 @@ beforeEach(() => {
   lastHookCall.prefixes = null;
   lastHookCall.onMatch = null;
   invalidateKey('runs:summary:racoon-city');
+  invalidateKey('runs:census:racoon-city');
   mockLoadRunSummaryPreview.mockResolvedValue(buildRunSource('fresh'));
   mockLoadRunSummary.mockResolvedValue(buildRunSource('fresh'));
   mockLoadRunSummaryActive.mockResolvedValue(buildRunSource('fresh'));
@@ -263,7 +264,79 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
     mount();
 
     expect(await screen.findByText('Stale formula run')).toBeTruthy();
-    expect(screen.getByText(/0 non-stale runs in flight; canonical state counts unavailable/i)).toBeTruthy();
+    expect(
+      screen.getByText(/0 non-stale active lanes; canonical state counts unavailable/i),
+    ).toBeTruthy();
+  });
+
+  it('does not call a blocked-only lane count runs in flight when census is unavailable', async () => {
+    const source = buildRunSource('fresh');
+    const summary = requireRunData(source);
+    summary.totalActive = 0;
+    summary.blockedLanes = [
+      activeLane({ title: 'Blocked formula run', phase: 'blocked', phaseLabel: 'blocked' }),
+    ];
+    summary.runCounts = { ...summary.runCounts, total: 1, blocked: 1 };
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
+
+    mount();
+
+    expect(await screen.findByRole('region', { name: /blocked runs/i })).toBeTruthy();
+    expect(
+      screen.getByText(/0 non-stale active lanes; canonical state counts unavailable/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/0 runs in flight/i)).toBeNull();
+  });
+
+  it('withholds partial census counts', async () => {
+    mockRunCensus.mockResolvedValue({
+      partial: true,
+      status_counts: {
+        pending: 2,
+        active: 3,
+        waiting: 0,
+        canceling: 0,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    const inFlight = screen.getByText('In flight');
+    expect(inFlight.nextElementSibling?.textContent).toBe('—');
+    expect(screen.queryByText(/2 queued/)).toBeNull();
+  });
+
+  it('withholds cached census counts after a failed refresh', async () => {
+    mockRunCensus
+      .mockResolvedValueOnce({
+        status_counts: {
+          pending: 2,
+          active: 3,
+          waiting: 0,
+          canceling: 0,
+          completed: 0,
+          failed: 0,
+          canceled: 0,
+          skipped: 0,
+        },
+      })
+      .mockRejectedValueOnce(new Error('census refresh failed'));
+
+    mount();
+
+    expect(await screen.findByText(/2 queued/)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+    });
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('—');
   });
 
   it('keeps canonical open-run counts separate from unavailable lane details', async () => {

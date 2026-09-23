@@ -141,8 +141,8 @@ func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.T
 // session transcript. Validation merges the muse default root
 // (~/.local/share/muse/sessions) on top of the configured search paths, in
 // the same way the codex route merges its own roots.
-// The scan window grows until cursorID or the transcript start is in view, so
-// the end-of-interval sweep can recover calls that left the fixed tail.
+// The scan reads to the transcript start or the 16 MiB cap; the caller folds
+// usage after cursorID.
 func (a SessionLogAdapter) MuseTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
 	return sessionlog.ExtractMuseTailUsageSinceFromSearchPaths(a.SearchPaths, path, cursorID)
 }

@@ -5053,6 +5053,38 @@ func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+func TestStopManagedCityReportsBeadStoreFailureAfterCleanExit(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forced=%t", forced), func(t *testing.T) {
+			cityPath := t.TempDir()
+			failure := errors.New("poller identity unavailable")
+			overrideShutdownBeadsProviderForStop(t, func(path string) error {
+				if path != cityPath {
+					t.Fatalf("shutdown path = %q, want %q", path, cityPath)
+				}
+				return failure
+			})
+			done := make(chan struct{})
+			close(done)
+			closer := &closerSpy{}
+			mc := &managedCity{name: "bright-lights", cancel: func() {}, done: done, closer: closer}
+			if forced {
+				mc.cr = &CityRuntime{
+					cfg: &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "0s"}},
+					sp:  runtime.NewFake(), rec: events.Discard, stdout: io.Discard, stderr: io.Discard,
+				}
+			}
+			var stderr bytes.Buffer
+			if err := stopManagedCity(mc, cityPath, &stderr); !errors.Is(err, failure) {
+				t.Fatalf("stopManagedCity() = %v, want storage failure", err)
+			}
+			if !closer.closed || !strings.Contains(stderr.String(), failure.Error()) {
+				t.Fatalf("closer closed=%t stderr=%q", closer.closed, stderr.String())
+			}
+		})
+	}
+}
+
 func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	cityPath := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "ops.log")
@@ -5143,6 +5175,7 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		start := time.Now()
 		var runtimeElapsed time.Duration
 		providerStops := 0
+		storageErr := errors.New("poller identity unavailable")
 		const providerLatency = 40 * time.Millisecond
 		shutdownBeadsProviderForStop = func(path string) error {
 			if path != cityPath {
@@ -5153,7 +5186,7 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 			// Virtual provider latency is deliberately outside the runtime
 			// budget; do not claim a bound for the entire provider teardown.
 			<-time.After(providerLatency)
-			return nil
+			return storageErr
 		}
 		var stderr bytes.Buffer
 		err := stopManagedCity(mc, cityPath, &stderr)
@@ -5171,6 +5204,9 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		}
 		if err == nil || !strings.Contains(err.Error(), "did not exit") {
 			t.Fatalf("stopManagedCity error = %v, want did-not-exit detail", err)
+		}
+		if !errors.Is(err, storageErr) {
+			t.Fatalf("stopManagedCity error = %v, want storage error", err)
 		}
 		if !forceStop.Load() || !closer.closed {
 			t.Fatalf("force stop=%v closer closed=%v, want both true", forceStop.Load(), closer.closed)

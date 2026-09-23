@@ -1218,13 +1218,15 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if timeout > 0 {
 		select {
 		case <-mc.done:
+			var storeErr error
 			if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+				storeErr = fmt.Errorf("city %q bead store shutdown: %w", mc.name, err)
 			}
 			if mc.closer != nil {
 				mc.closer.Close() //nolint:errcheck
 			}
-			return nil
+			return storeErr
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
@@ -1266,6 +1268,7 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	}
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+		stopErr = errors.Join(stopErr, fmt.Errorf("city %q bead store shutdown: %w", mc.name, err))
 	}
 	if mc.closer != nil {
 		mc.closer.Close() //nolint:errcheck

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidate } from '../api/cache';
+import { setActiveCity } from '../api/cityBase';
 import { NowProvider } from '../contexts/NowContext';
 import {
   getSupervisorOrder,
@@ -65,8 +66,8 @@ function historyEntry(
   };
 }
 
-function renderDetail(name = 'triage-sweep') {
-  return render(
+function detailRoute(name = 'triage-sweep') {
+  return (
     <MemoryRouter
       initialEntries={[`/orders/${name}`]}
       future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
@@ -76,13 +77,19 @@ function renderDetail(name = 'triage-sweep') {
           <Route path="/orders/:name" element={<OrderDetailPage />} />
         </Routes>
       </NowProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderDetail(name = 'triage-sweep') {
+  return render(detailRoute(name));
 }
 
 describe('OrderDetailPage', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     invalidate('orders');
+    setActiveCity('test-city');
     mockOrder = order();
     mockHistory = [];
     orderMode = 'ok';
@@ -126,6 +133,45 @@ describe('OrderDetailPage', () => {
     await screen.findByText('Sweep the triage queue.');
     expect(vi.mocked(getSupervisorOrder)).toHaveBeenCalledWith('sweep%2Farchive');
     expect(vi.mocked(listSupervisorOrderHistory)).toHaveBeenCalledWith('sweep%2Farchive');
+  });
+
+  it.each([
+    ['triage-sweep/', 'triage-sweep'],
+    ['sweep%252Farchive/', 'sweep%2Farchive'],
+  ])('fetches the order from a route with a trailing slash: %s', async (route, expected) => {
+    renderDetail(route);
+
+    await screen.findByText('Sweep the triage queue.');
+    expect(vi.mocked(getSupervisorOrder)).toHaveBeenCalledWith(expected);
+    expect(vi.mocked(listSupervisorOrderHistory)).toHaveBeenCalledWith(expected);
+  });
+
+  it('keeps a malformed percent escape literal', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation((message) => {
+      if (!String(message).includes('could not be decoded')) throw new Error(String(message));
+    });
+    try {
+      renderDetail('sweep%broken');
+
+      await screen.findByText('Sweep the triage queue.');
+      expect(vi.mocked(getSupervisorOrder)).toHaveBeenCalledWith('sweep%broken');
+      expect(warning).toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('hides selected output when the active city changes', async () => {
+    mockHistory = [historyEntry({ has_output: true })];
+    const page = renderDetail();
+    await screen.findByText('bd-1');
+    fireEvent.click(screen.getByRole('button', { name: 'View output' }));
+    expect(await screen.findByText('backup completed')).toBeDefined();
+
+    setActiveCity('other-city');
+    page.rerender(detailRoute());
+
+    expect(screen.queryByText('backup completed')).toBeNull();
   });
 
   it('renders recent run history with duration and exit code', async () => {

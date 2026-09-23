@@ -188,7 +188,7 @@ func TestExtractMuseTailUsageSinceRecoversBeyondFixedTail(t *testing.T) {
 	}
 }
 
-func TestExtractMuseTailUsageSinceStopsAtRecentCursor(t *testing.T) {
+func TestExtractMuseTailUsageSinceRetainsOlderEntriesAtRecentCursor(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	writeMuseUsageLines(t, path, []string{
 		museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
@@ -197,8 +197,41 @@ func TestExtractMuseTailUsageSinceStopsAtRecentCursor(t *testing.T) {
 		museModelCompletedLine(3, "rec-3", "run-3", 1789892400000000, "muse-spark-1.3", 300, 30, 0, 0, 0, 0),
 	})
 	usages, err := ExtractMuseTailUsageSince(path, "run-2")
-	if err != nil || len(usages) != 2 || usages[0].MessageID != "run-2" || usages[1].MessageID != "run-3" {
-		t.Fatalf("recent cursor: usages = %+v, err = %v", usages, err)
+	if err != nil || len(usages) != 3 || usages[0].MessageID != "run-1" || usages[1].MessageID != "run-2" || usages[2].MessageID != "run-3" {
+		t.Fatalf("bounded transcript: usages = %+v, err = %v", usages, err)
+	}
+}
+
+func TestExtractMuseTailUsageSinceKeepsInvocationBeforeCursorReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		firstAt           int64
+		secondAt          int64
+		replayAt          int64
+		missingReplayTime bool
+	}{
+		{"newer replay", 1789892240839929, 1789892300000000, 1789892400000000, false},
+		{"equal timestamps", 1789892240839929, 1789892240839929, 1789892240839929, false},
+		{"zero timestamps", 0, 0, 0, false},
+		{"missing replay timestamp", 0, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			replay := museModelCompletedLine(3, "rec-a-copy", "run-a", tc.replayAt, "muse-spark-1.3", 150, 15, 0, 0, 0, 0)
+			if tc.missingReplayTime {
+				replay = strings.Replace(replay, `,"recorded_at":0`, "", 1)
+			}
+			writeMuseUsageLines(t, path, []string{
+				museModelCompletedLine(1, "rec-a", "run-a", tc.firstAt, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+				strings.Repeat("x", tailChunkSize+1),
+				museModelCompletedLine(2, "rec-b", "run-b", tc.secondAt, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+				replay,
+			})
+			usages, err := ExtractMuseTailUsageSince(path, "run-a")
+			if err != nil || len(usages) != 2 || usages[0].MessageID != "run-a" || usages[1].MessageID != "run-b" || usages[0].InputTokens != 150 {
+				t.Fatalf("cursor replay: usages = %+v, err = %v", usages, err)
+			}
+		})
 	}
 }
 

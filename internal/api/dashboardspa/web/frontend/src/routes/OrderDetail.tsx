@@ -24,7 +24,8 @@ import {
 
 export function OrderDetailPage() {
   const { pathname } = useLocation();
-  const rawName = pathname.slice(pathname.lastIndexOf('/') + 1);
+  const routePath = pathname.replace(/\/+$/, '');
+  const rawName = routePath.slice(routePath.lastIndexOf('/') + 1);
   let scopedName: string;
   try {
     scopedName = decodeURIComponent(rawName);
@@ -63,7 +64,9 @@ export function OrderDetailPage() {
     <section>
       <PageHeader
         title={order?.name ?? scopedName}
-        synopsis={order?.description ?? (order === null && error === null ? 'Loading order.' : null)}
+        synopsis={
+          order?.description ?? (order === null && error === null ? 'Loading order.' : null)
+        }
         meta={
           <>
             {error && (
@@ -121,7 +124,10 @@ export function OrderDetailPage() {
               empty="No recorded runs."
             />
             {visibleOutput !== null && (
-              <OrderOutputViewer key={`${city ?? 'no-city'}:${historyRowKey(visibleOutput)}`} entry={visibleOutput} />
+              <OrderOutputViewer
+                key={`${city ?? 'no-city'}:${historyRowKey(visibleOutput)}`}
+                entry={visibleOutput}
+              />
             )}
           </section>
         </div>
@@ -180,13 +186,17 @@ function historyColumns(
           <Button
             size="sm"
             tone="quiet"
-            onClick={() => setSelectedOutput(
-              selectedOutput?.bead_id === entry.bead_id && selectedOutput.store_ref === entry.store_ref
-                ? null
-                : entry,
-            )}
+            onClick={() =>
+              setSelectedOutput(
+                selectedOutput?.bead_id === entry.bead_id &&
+                  selectedOutput.store_ref === entry.store_ref
+                  ? null
+                  : entry,
+              )
+            }
           >
-            {selectedOutput?.bead_id === entry.bead_id && selectedOutput.store_ref === entry.store_ref
+            {selectedOutput?.bead_id === entry.bead_id &&
+            selectedOutput.store_ref === entry.store_ref
               ? 'Hide output'
               : 'View output'}
           </Button>
@@ -205,11 +215,19 @@ function OrderOutputViewer({ entry }: { entry: SupervisorOrderHistoryEntry }) {
   );
   return (
     <section aria-label={`Output for ${entry.bead_id}`} className="mt-5 space-y-2">
-      <h3 className="text-label uppercase tracking-wider text-fg-muted">Run output · {entry.bead_id}</h3>
+      <h3 className="text-label uppercase tracking-wider text-fg-muted">
+        Run output · {entry.bead_id}
+      </h3>
       {loading && <p className="text-body text-fg-muted">Loading output.</p>}
-      {error !== null && <p className="text-body text-accent" role="alert">{error}</p>}
+      {error !== null && (
+        <p className="text-body text-accent" role="alert">
+          {error}
+        </p>
+      )}
       {data !== undefined && (
-        <pre className="text-body whitespace-pre-wrap break-words rounded-sm bg-surface-tint p-4">{data.output || 'No stored output returned.'}</pre>
+        <pre className="text-body whitespace-pre-wrap break-words rounded-sm bg-surface-tint p-4">
+          {data.output || 'No stored output returned.'}
+        </pre>
       )}
     </section>
   );
