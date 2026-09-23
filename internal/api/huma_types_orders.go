@@ -17,6 +17,7 @@ type OrdersFeedInput struct {
 // OrderListInput is the Huma input for GET /v0/city/{cityName}/orders.
 type OrderListInput struct {
 	CityScope
+	IncludeDisabled bool `query:"include_disabled" required:"false" doc:"Include disabled registered orders."`
 }
 
 // OrderGetInput is the Huma input for GET /v0/city/{cityName}/order/{name}.

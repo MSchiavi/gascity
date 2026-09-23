@@ -9713,6 +9713,12 @@ type PostV0CityByCityNameOrderByNameRunParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// GetV0CityByCityNameOrdersParams defines parameters for GetV0CityByCityNameOrders.
+type GetV0CityByCityNameOrdersParams struct {
+	// IncludeDisabled Include disabled registered orders.
+	IncludeDisabled *bool `form:"include_disabled,omitempty" json:"include_disabled,omitempty"`
+}
+
 // GetV0CityByCityNameOrdersCheckParams defines parameters for GetV0CityByCityNameOrdersCheck.
 type GetV0CityByCityNameOrdersCheckParams struct {
 	// Fresh Bypass cached order-check responses and cached order history.
@@ -19893,7 +19899,7 @@ type ClientInterface interface {
 	PostV0CityByCityNameOrderByNameRun(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrders request
-	GetV0CityByCityNameOrders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameOrders(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrdersCheck request
 	GetV0CityByCityNameOrdersCheck(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21542,8 +21548,8 @@ func (c *Client) PostV0CityByCityNameOrderByNameRun(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameOrders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameOrdersRequest(c.Server, cityName)
+func (c *Client) GetV0CityByCityNameOrders(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameOrdersRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -28566,7 +28572,7 @@ func NewPostV0CityByCityNameOrderByNameRunRequestWithBody(server string, cityNam
 }
 
 // NewGetV0CityByCityNameOrdersRequest generates requests for GetV0CityByCityNameOrders
-func NewGetV0CityByCityNameOrdersRequest(server string, cityName string) (*http.Request, error) {
+func NewGetV0CityByCityNameOrdersRequest(server string, cityName string, params *GetV0CityByCityNameOrdersParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -28589,6 +28595,28 @@ func NewGetV0CityByCityNameOrdersRequest(server string, cityName string) (*http.
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.IncludeDisabled != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_disabled", *params.IncludeDisabled, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -33443,7 +33471,7 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameOrderByNameRunWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameRunParams, body PostV0CityByCityNameOrderByNameRunJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameRunResponse, error)
 
 	// GetV0CityByCityNameOrdersWithResponse request
-	GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error)
+	GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error)
 
 	// GetV0CityByCityNameOrdersCheckWithResponse request
 	GetV0CityByCityNameOrdersCheckWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersCheckParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersCheckResponse, error)
@@ -39154,8 +39182,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameRunWithResponse(ctx
 }
 
 // GetV0CityByCityNameOrdersWithResponse request returning *GetV0CityByCityNameOrdersResponse
-func (c *ClientWithResponses) GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error) {
-	rsp, err := c.GetV0CityByCityNameOrders(ctx, cityName, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameOrdersParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error) {
+	rsp, err := c.GetV0CityByCityNameOrders(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

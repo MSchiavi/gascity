@@ -14,8 +14,11 @@ export type SupervisorOrderHistoryDetail = OrderHistoryDetailResponse;
 
 export const DEFAULT_ORDER_HISTORY_LIMIT = 20;
 
-export async function listSupervisorOrders(): Promise<SupervisorOrder[]> {
-  const list = await supervisorApi().listOrders(activeCityOrThrow('list supervisor orders'));
+export async function listSupervisorOrders(includeDisabled = false): Promise<SupervisorOrder[]> {
+  const list = await supervisorApi().listOrders(
+    activeCityOrThrow('list supervisor orders'),
+    includeDisabled ? { include_disabled: true } : undefined,
+  );
   return list.orders ?? [];
 }
 

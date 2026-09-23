@@ -47,6 +47,7 @@ import type {
   GetHealthResponse,
   GetV0CityByCityNameHealthResponse,
   GetV0CityByCityNameMailData,
+  GetV0CityByCityNameOrdersData,
   GetV0CityByCityNameSessionByIdTranscriptData,
   GetV0CityByCityNameStatusResponse,
   GetV0CityByCityNameWorkflowByWorkflowIdData,
@@ -187,14 +188,21 @@ export interface SupervisorApi {
     name: string,
     query: GetV0CityByCityNameFormulasByNameData['query'],
   ): Promise<FormulaDetailResponse>;
-  listOrders(cityName: string): Promise<OrderListBody>;
+  listOrders(
+    cityName: string,
+    query?: GetV0CityByCityNameOrdersData['query'],
+  ): Promise<OrderListBody>;
   getOrder(cityName: string, name: string): Promise<OrderResponse>;
   listOrderChecks(cityName: string): Promise<OrderCheckListBody>;
   orderHistory(
     cityName: string,
     query: NonNullable<GetV0CityByCityNameOrdersHistoryData['query']>,
   ): Promise<OrderHistoryListBody>;
-  orderHistoryDetail(cityName: string, beadId: string, storeRef: string): Promise<OrderHistoryDetailResponse>;
+  orderHistoryDetail(
+    cityName: string,
+    beadId: string,
+    storeRef: string,
+  ): Promise<OrderHistoryDetailResponse>;
   mutationHeaders(): Record<keyof typeof GC_MUTATION_HEADERS, string>;
 }
 
@@ -560,33 +568,49 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         'gc supervisor formula detail response was empty',
       );
     },
-    listOrders(cityName) {
+    listOrders(cityName, query) {
       return unwrapSupervisorResult<OrderListBody>(
-        getV0CityByCityNameOrders({ client, path: { cityName } }) as Promise<SupervisorResult<OrderListBody>>,
+        getV0CityByCityNameOrders({
+          client,
+          path: { cityName },
+          ...(query ? { query } : {}),
+        }) as Promise<
+          SupervisorResult<OrderListBody>
+        >,
         'gc supervisor orders response was empty',
       );
     },
     getOrder(cityName, name) {
       return unwrapSupervisorResult<OrderResponse>(
-        getV0CityByCityNameOrderByName({ client, path: { cityName, name } }) as Promise<SupervisorResult<OrderResponse>>,
+        getV0CityByCityNameOrderByName({ client, path: { cityName, name } }) as Promise<
+          SupervisorResult<OrderResponse>
+        >,
         'gc supervisor order response was empty',
       );
     },
     listOrderChecks(cityName) {
       return unwrapSupervisorResult<OrderCheckListBody>(
-        getV0CityByCityNameOrdersCheck({ client, path: { cityName } }) as Promise<SupervisorResult<OrderCheckListBody>>,
+        getV0CityByCityNameOrdersCheck({ client, path: { cityName } }) as Promise<
+          SupervisorResult<OrderCheckListBody>
+        >,
         'gc supervisor order checks response was empty',
       );
     },
     orderHistory(cityName, query) {
       return unwrapSupervisorResult<OrderHistoryListBody>(
-        getV0CityByCityNameOrdersHistory({ client, path: { cityName }, query }) as Promise<SupervisorResult<OrderHistoryListBody>>,
+        getV0CityByCityNameOrdersHistory({ client, path: { cityName }, query }) as Promise<
+          SupervisorResult<OrderHistoryListBody>
+        >,
         'gc supervisor order history response was empty',
       );
     },
     orderHistoryDetail(cityName, beadId, storeRef) {
       return unwrapSupervisorResult<OrderHistoryDetailResponse>(
-        getV0CityByCityNameOrderHistoryByBeadId({ client, path: { cityName, bead_id: beadId }, query: { store_ref: storeRef } }) as Promise<SupervisorResult<OrderHistoryDetailResponse>>,
+        getV0CityByCityNameOrderHistoryByBeadId({
+          client,
+          path: { cityName, bead_id: beadId },
+          query: { store_ref: storeRef },
+        }) as Promise<SupervisorResult<OrderHistoryDetailResponse>>,
         'gc supervisor order history detail response was empty',
       );
     },

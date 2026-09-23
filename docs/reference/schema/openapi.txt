@@ -39290,6 +39290,16 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Include disabled registered orders.",
+            "explode": false,
+            "in": "query",
+            "name": "include_disabled",
+            "schema": {
+              "description": "Include disabled registered orders.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

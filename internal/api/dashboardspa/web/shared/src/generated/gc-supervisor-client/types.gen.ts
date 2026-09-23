@@ -15035,7 +15035,12 @@ export type GetV0CityByCityNameOrdersData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Include disabled registered orders.
+         */
+        include_disabled?: boolean;
+    };
     url: '/v0/city/{cityName}/orders';
 };
 

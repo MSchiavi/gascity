@@ -24,14 +24,14 @@ import {
 
 interface OrderRow {
   order: SupervisorOrder;
-  check: SupervisorOrderCheck | null | undefined;
+  check: SupervisorOrderCheck | undefined;
 }
 
 export function OrdersPage() {
   const now = useNow();
   const city = getActiveCity();
   const ordersSource = useCachedData(`orders:list:${city ?? 'no-city'}`, () =>
-    listSupervisorOrders(),
+    listSupervisorOrders(true),
   );
   const checksSource = useCachedData(`orders:checks:${city ?? 'no-city'}`, () =>
     listSupervisorOrderChecks(),
@@ -53,13 +53,22 @@ export function OrdersPage() {
     );
     return (ordersSource.data ?? []).map((order) => ({
       order,
-      check: checksAvailable ? (checks.get(order.scoped_name) ?? null) : undefined,
+      check: checksAvailable && order.enabled ? checks.get(order.scoped_name) : undefined,
     }));
   }, [ordersSource.data, checksSource.data, checksAvailable]);
 
+  const enabledOrders = (ordersSource.data ?? []).filter((order) => order.enabled);
+  const enabledNames = new Set(enabledOrders.map((order) => order.scoped_name));
+  const checks = checksSource.data ?? [];
+  const checkNames = new Set(checks.map((check) => check.scoped_name));
+  const checksMatchOrders =
+    enabledOrders.length === enabledNames.size &&
+    enabledNames.size === checks.length &&
+    checkNames.size === checks.length &&
+    checks.every((check) => enabledNames.has(check.scoped_name));
   const dueCount =
-    ordersAvailable && checksAvailable
-      ? (checksSource.data?.filter((check) => check.due).length ?? null)
+    ordersAvailable && checksAvailable && checksMatchOrders
+      ? checks.filter((check) => check.due).length
       : null;
   const loading = ordersSource.loading || checksSource.loading;
   const error =
@@ -96,7 +105,7 @@ export function OrdersPage() {
         }
       />
 
-      {ordersSource.data === undefined ? (
+      {!ordersAvailable ? (
         <p className="text-body text-fg-muted italic">
           {ordersSource.loading ? 'Loading orders.' : 'Order list unavailable.'}
         </p>
@@ -165,7 +174,7 @@ function orderColumns(now: number): ReadonlyArray<TableColumn<OrderRow>> {
       render: (row) =>
         row.check === undefined ? (
           <span className="text-fg-muted">—</span>
-        ) : row.check?.last_run === undefined ? (
+        ) : row.check.last_run === undefined ? (
           <span className="text-fg-muted">never</span>
         ) : (
           <span>
@@ -180,7 +189,7 @@ function orderColumns(now: number): ReadonlyArray<TableColumn<OrderRow>> {
       key: 'next-due',
       label: 'Next due',
       render: (row) =>
-        row.check == null ? (
+        row.check === undefined ? (
           <span className="text-fg-muted">—</span>
         ) : row.check.due ? (
           <StatusBadge tone="warn" label="due now" title={row.check.reason} />

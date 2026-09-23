@@ -40,6 +40,47 @@ func TestHandleOrderList_Empty(t *testing.T) {
 	}
 }
 
+func TestHandleOrderListIncludesDisabledOnlyWhenRequested(t *testing.T) {
+	fs := newFakeState(t)
+	enabled := true
+	disabled := false
+	fs.autos = []orders.Order{{Name: "active", Enabled: &enabled}}
+	fs.allOrders = []orders.Order{
+		{Name: "active", Enabled: &enabled},
+		{Name: "paused", Enabled: &disabled},
+	}
+	h := newTestCityHandler(t, fs)
+	for _, tc := range []struct {
+		query string
+		want  []string
+	}{
+		{query: "", want: []string{"active"}},
+		{query: "?include_disabled=true", want: []string{"active", "paused"}},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders")+tc.query, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+			}
+			var resp struct {
+				Orders []orderResponse `json:"orders"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.Orders) != len(tc.want) {
+				t.Fatalf("orders = %+v, want %v", resp.Orders, tc.want)
+			}
+			for i, name := range tc.want {
+				if resp.Orders[i].Name != name || resp.Orders[i].Enabled != (name == "active") {
+					t.Fatalf("orders[%d] = %+v, want %q enabled=%t", i, resp.Orders[i], name, name == "active")
+				}
+			}
+		})
+	}
+}
+
 func TestHandleOrderList(t *testing.T) {
 	fs := newFakeState(t)
 	enabled := true

@@ -1,11 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrderCheckListBody } from 'gas-city-dashboard-shared/gc-supervisor';
 import { setActiveCity } from '../api/cityBase';
-import {
-  resetSupervisorApiForTests,
-  setSupervisorApiForTests,
-  type SupervisorApi,
-} from './client';
+import { resetSupervisorApiForTests, setSupervisorApiForTests, type SupervisorApi } from './client';
 import {
   DEFAULT_ORDER_HISTORY_LIMIT,
   getSupervisorOrder,
@@ -83,9 +79,19 @@ describe('supervisor order reads', () => {
 
     const result = await listSupervisorOrders();
 
-    expect(listOrders).toHaveBeenCalledWith('test-city');
+    expect(listOrders).toHaveBeenCalledWith('test-city', undefined);
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ name: 'triage-sweep' });
+  });
+
+  it('requests disabled orders only for the registered-orders view', async () => {
+    const listOrders = vi.fn(async () => ({ orders: [order({ enabled: false })] }));
+    setSupervisorApiForTests({ ...baseApi, listOrders });
+
+    const result = await listSupervisorOrders(true);
+
+    expect(listOrders).toHaveBeenCalledWith('test-city', { include_disabled: true });
+    expect(result[0].enabled).toBe(false);
   });
 
   it('normalizes a null orders list to an empty array', async () => {
@@ -154,7 +160,9 @@ describe('supervisor order reads', () => {
     const orderHistoryDetail = vi.fn(async () => detail);
     setSupervisorApiForTests({ ...baseApi, orderHistoryDetail });
 
-    await expect(getSupervisorOrderHistoryDetail('bd-1', 'city:test-city')).resolves.toEqual(detail);
+    await expect(getSupervisorOrderHistoryDetail('bd-1', 'city:test-city')).resolves.toEqual(
+      detail,
+    );
     expect(orderHistoryDetail).toHaveBeenCalledWith('test-city', 'bd-1', 'city:test-city');
   });
 });

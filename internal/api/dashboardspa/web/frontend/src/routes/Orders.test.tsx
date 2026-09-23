@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidate } from '../api/cache';
@@ -13,13 +13,19 @@ import { OrdersPage } from './Orders';
 
 let mockOrders: SupervisorOrder[] = [];
 let mockChecks: SupervisorOrderCheck[] = [];
-let ordersMode: 'ok' | 'fail' = 'ok';
+let ordersMode: 'ok' | 'fail' | 'pending' = 'ok';
 let checksMode: 'ok' | 'fail' | 'pending' = 'ok';
+let releaseOrders: (() => void) | null = null;
 let releaseChecks: (() => void) | null = null;
 
 vi.mock('../supervisor/orderReads', () => ({
   listSupervisorOrders: vi.fn(async () => {
     if (ordersMode === 'fail') throw new Error('orders unavailable');
+    if (ordersMode === 'pending') {
+      await new Promise<void>((resolve) => {
+        releaseOrders = resolve;
+      });
+    }
     return mockOrders;
   }),
   listSupervisorOrderChecks: vi.fn(async () => {
@@ -72,6 +78,7 @@ describe('OrdersPage', () => {
     mockChecks = [];
     ordersMode = 'ok';
     checksMode = 'ok';
+    releaseOrders = null;
     releaseChecks = null;
   });
 
@@ -135,6 +142,19 @@ describe('OrdersPage', () => {
     renderPage();
 
     expect(await screen.findByText('disabled')).toBeDefined();
+    expect(await screen.findByText(/0 due now/)).toBeDefined();
+    expect(screen.queryByText('never')).toBeNull();
+    expect(listSupervisorOrders).toHaveBeenCalledWith(true);
+  });
+
+  it('counts enabled checks while showing disabled orders', async () => {
+    mockOrders = [order(), order({ name: 'paused', scoped_name: 'paused', enabled: false })];
+    mockChecks = [check({ due: true, reason: 'due' })];
+    renderPage();
+
+    expect(await screen.findByText(/1 due now/)).toBeDefined();
+    expect(screen.getByText('disabled')).toBeDefined();
+    expect(within(screen.getByRole('row', { name: /paused/ })).queryByText('never')).toBeNull();
   });
 
   it('renders an empty state when no orders are registered', async () => {
@@ -172,6 +192,7 @@ describe('OrdersPage', () => {
 
   it('withholds due counts while checks are loading', async () => {
     mockOrders = [order()];
+    mockChecks = [check()];
     checksMode = 'pending';
     renderPage();
 
@@ -201,7 +222,7 @@ describe('OrdersPage', () => {
     expect(screen.queryByText(/^due now$/)).toBeNull();
   });
 
-  it('counts every due check even when the order list omits a newly registered order', async () => {
+  it('withholds due counts when a check has no matching registered order', async () => {
     mockOrders = [order()];
     mockChecks = [
       check(),
@@ -209,7 +230,43 @@ describe('OrdersPage', () => {
     ];
     renderPage();
 
-    expect(await screen.findByText(/1 due now/)).toBeDefined();
+    expect(await screen.findByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/1 due now/)).toBeNull();
+  });
+
+  it('withholds due counts and never-run claims when a new enabled order has no check', async () => {
+    mockOrders = [order(), order({ name: 'new-sweep', scoped_name: 'new-sweep' })];
+    mockChecks = [check()];
+    renderPage();
+
+    expect(await screen.findByRole('link', { name: 'new-sweep' })).toBeDefined();
+    expect(screen.getByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/0 due now/)).toBeNull();
+    expect(within(screen.getByRole('row', { name: /new-sweep/ })).queryByText('never')).toBeNull();
+  });
+
+  it('withholds due counts when an old check remains after an order is removed', async () => {
+    mockOrders = [];
+    mockChecks = [check({ due: true })];
+    renderPage();
+
+    expect(await screen.findByText('No orders registered.')).toBeDefined();
+    expect(screen.getByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/1 due now/)).toBeNull();
+  });
+
+  it('withholds due counts while orders are loading', async () => {
+    mockOrders = [order()];
+    mockChecks = [check()];
+    ordersMode = 'pending';
+    renderPage();
+
+    expect(screen.getAllByText('Loading orders.').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/0 due now/)).toBeNull();
+    await act(async () => {
+      releaseOrders?.();
+    });
+    expect(await screen.findByText(/0 due now/)).toBeDefined();
   });
 
   it('withholds counts when the orders refresh fails but checks refresh succeeds', async () => {

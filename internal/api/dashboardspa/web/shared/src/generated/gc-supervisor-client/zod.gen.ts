@@ -8757,6 +8757,10 @@ export const zGetV0CityByCityNameOrdersPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
 });
 
+export const zGetV0CityByCityNameOrdersQuery = z.object({
+    include_disabled: z.boolean().optional()
+});
+
 /**
  * OK
  */
