@@ -197,7 +197,7 @@ func TestBuildUsageBodyDoesNotInferTimingFromMixedIntervalsOrFactCounts(t *testi
 	}
 	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
 	for _, row := range body.TodayByRun {
-		if row.TimingComplete != (row.Run == "compute-only") {
+		if row.TimingComplete {
 			t.Fatalf("timing completeness for %s = %t", row.Run, row.TimingComplete)
 		}
 	}

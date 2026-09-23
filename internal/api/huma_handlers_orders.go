@@ -393,16 +393,26 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 	}
 	infos := make([]workflowStoreInfo, 0, 2)
 	if strings.TrimSpace(a.Rig) != "" {
-		rigStore := state.BeadStore(a.Rig)
-		if rigStore == nil {
-			return nil, fmt.Errorf("order rig store unavailable for %s", a.ScopedName())
+		cfg := state.Config()
+		if cfg == nil {
+			return nil, fmt.Errorf("order rig configuration unavailable for %s", a.ScopedName())
 		}
-		infos = append(infos, workflowStoreInfo{
-			ref:       "rig:" + a.Rig,
-			scopeKind: beadmeta.ScopeKindRig,
-			scopeRef:  a.Rig,
-			store:     rigStore,
-		})
+		for _, rig := range cfg.Rigs {
+			if rig.Name != a.Rig {
+				continue
+			}
+			rigStore := state.BeadStore(a.Rig)
+			if rigStore == nil {
+				return nil, fmt.Errorf("order rig store unavailable for %s", a.ScopedName())
+			}
+			infos = append(infos, workflowStoreInfo{
+				ref:       "rig:" + a.Rig,
+				scopeKind: beadmeta.ScopeKindRig,
+				scopeRef:  a.Rig,
+				store:     rigStore,
+			})
+			break
+		}
 	}
 
 	infos = append(infos, workflowStoreInfo{

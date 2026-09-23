@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -276,6 +277,48 @@ func splitOrdersFakeState(t *testing.T) (*fakeState, beads.Store) {
 	st.stores = nil
 	st.cfg.Rigs = nil
 	return st, binding
+}
+
+func TestRetiredRigOrderHistoryAndOutputFromSurvivingStores(t *testing.T) {
+	for _, storeName := range []string{"city", "orders"} {
+		t.Run(storeName, func(t *testing.T) {
+			st := newFakeState(t)
+			st.cityBeadStore = beads.NewMemStore()
+			st.ordersBeadStore = beads.NewMemStore()
+			st.cfg.Rigs = nil
+			st.stores = nil
+			store := st.cityBeadStore
+			wantRef := "city:test-city"
+			if storeName == "orders" {
+				store = st.ordersBeadStore
+				wantRef = "orders:test-city"
+			}
+			bead := seedClosedOrderRunBead(t, store, "nightly-review:rig:retired", storeName+" output")
+			h := newTestCityHandler(t, st)
+			beadID, storeRef := orderHistoryListStoreRef(t, h, st, "nightly-review:rig:retired")
+			if beadID != bead.ID || storeRef != wantRef {
+				t.Fatalf("history identity = %s/%s, want %s/%s", beadID, storeRef, bead.ID, wantRef)
+			}
+			status, detail := orderHistoryDetail(t, h, st, beadID, storeRef)
+			if status != http.StatusOK || detail.BeadID != bead.ID || detail.StoreRef != wantRef || detail.Output != storeName+" output" {
+				t.Fatalf("detail status = %d, body = %+v", status, detail)
+			}
+		})
+	}
+}
+
+func TestConfiguredRigWithoutStoreDoesNotReturnPartialOrderHistory(t *testing.T) {
+	st := newFakeState(t)
+	st.cityBeadStore = beads.NewMemStore()
+	st.ordersBeadStore = beads.NewMemStore()
+	st.stores = nil
+	seedClosedOrderRunBead(t, st.cityBeadStore, "nightly-review:rig:myrig", "city output")
+	h := newTestCityHandler(t, st)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(st, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil))
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "\"entries\"") {
+		t.Fatalf("status = %d, body = %s; want unavailable history", w.Code, w.Body.String())
+	}
 }
 
 // TestOrderHistoryListStoreRefRoundTripsToDetail is the list->detail contract:

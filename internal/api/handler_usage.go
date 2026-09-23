@@ -178,7 +178,6 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		worker    string
 		sessionID string
 		totals    usage.Totals
-		modelFact bool
 	}
 	byRun := make(map[string]*runAccum)
 	var today, last24h, recent usage.Totals
@@ -215,9 +214,6 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 				acc.sessionID = strings.TrimSpace(fact.SessionID)
 			}
 			acc.totals.Add(fact)
-			if fact.Kind == usage.KindModel {
-				acc.modelFact = true
-			}
 		}
 		if at.Before(recentFrom) || at.After(now) {
 			continue
@@ -289,7 +285,6 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 			WallSeconds:         acc.totals.WallSeconds,
 			CostUSDEstimate:     acc.totals.CostUSDEstimate,
 			Unpriced:            acc.totals.Unpriced,
-			TimingComplete:      !acc.modelFact && acc.totals.ComputeFacts > 0 && acc.totals.WallSeconds > 0,
 		})
 	}
 	body.TodayByRunTotal = len(body.TodayByRun)

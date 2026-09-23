@@ -154,7 +154,10 @@ EOF
 chmod +x "$fixture_dir/bin/xargs"
 cat > "$fixture_dir/probe" <<EOF
 #!/bin/sh
-printf 'GOFLAGS=%s\nGOMAXPROCS=%s\n' "\$GOFLAGS" "\$GOMAXPROCS" > "$fixture_dir/probe.out"
+printf 'GOFLAGS=%s\nGOMAXPROCS=%s\nOBSERVABLE_TEST_LOG=%s\nOBSERVABLE_FAILURE_LINES=%s\nGC_CITY=%s\nGC_HOME=%s\nGC_SESSION_ID=%s\n' \
+    "\$GOFLAGS" "\$GOMAXPROCS" "\${OBSERVABLE_TEST_LOG-<unset>}" \
+    "\${OBSERVABLE_FAILURE_LINES-<unset>}" "\${GC_CITY-<unset>}" \
+    "\${GC_HOME-<unset>}" "\${GC_SESSION_ID-<unset>}" > "$fixture_dir/probe.out"
 EOF
 chmod +x "$fixture_dir/probe"
 
@@ -162,6 +165,8 @@ for mode in fast full; do
     jobspecs="$fixture_dir/$mode.jobspecs"
     runner_output="$fixture_dir/$mode.out"
     PATH="$fixture_dir/bin:$PATH" GC_PUSH_GATE_NO_CAP=1 LOCAL_TEST_JOBS=2 GC_TEST_INNER_P=7 \
+        OBSERVABLE_TEST_LOG=fixture-log OBSERVABLE_FAILURE_LINES=17 \
+        GC_CITY=must-not-leak GC_HOME=must-not-leak GC_SESSION_ID=must-not-leak \
         GO_TEST_TIMEOUT=999h GC_LOCAL_JOBSPECS="$jobspecs" GC_LOCAL_PROBE="$fixture_dir/probe" \
         "$LOCAL_PARALLEL" "$mode" > "$runner_output" 2>&1
     runner_rc=$?
@@ -173,6 +178,11 @@ for mode in fast full; do
     assert_true "wiring.$mode.selftest_job" grep -q '^local-concurrency-selftest::' "$fixture_dir/$mode.jobs"
     assert_true "wiring.$mode.goflags" grep -q 'GOFLAGS=.*-p=7' "$fixture_dir/probe.out"
     assert_true "wiring.$mode.gomaxprocs" grep -q '^GOMAXPROCS=7$' "$fixture_dir/probe.out"
+    assert_true "wiring.$mode.observable_log" grep -q '^OBSERVABLE_TEST_LOG=fixture-log$' "$fixture_dir/probe.out"
+    assert_true "wiring.$mode.observable_lines" grep -q '^OBSERVABLE_FAILURE_LINES=17$' "$fixture_dir/probe.out"
+    for key in GC_CITY GC_HOME GC_SESSION_ID; do
+        assert_true "wiring.$mode.$key.sanitized" grep -q "^$key=<unset>$" "$fixture_dir/probe.out"
+    done
     assert_true "wiring.$mode.output" grep -q 'inner_p=7' "$runner_output"
 done
 
