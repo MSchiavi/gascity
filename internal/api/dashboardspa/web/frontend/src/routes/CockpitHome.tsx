@@ -28,6 +28,7 @@ import {
   dollarsPerMinute,
   laneToRing,
   pipelineSegments,
+  runRateAvailable,
   tokensPerMinute,
   type AggregateRunRates,
 } from '../components/cockpit/model';
@@ -430,21 +431,23 @@ export function CockpitHomePage() {
         ) : (
           <>
             <Table
-              columns={RUN_RATE_COLUMNS}
+              columns={runRateColumns(aggregateRatesAvailable)}
               rows={runRows}
               rowKey={(row) => row.run}
               empty="no runs recorded today"
             />
             {visibleRunAggregate !== null && (
-              <InstrumentNote>{formatRunAggregate(visibleRunAggregate)}</InstrumentNote>
+              <InstrumentNote>
+                {formatRunAggregate(visibleRunAggregate, usage?.today_by_run_total)}
+              </InstrumentNote>
             )}
             {(usageReading.stale || usage?.partial) && usageNote && (
               <InstrumentNote>{usageNote}</InstrumentNote>
             )}
-            {runAggregate?.unmeasuredWall && (
+            {runAggregate?.timingUnknown && (
               <InstrumentNote>
-                Wall time is unavailable until a compute interval completes; per-run rates need
-                measured wall time.
+                Rates are unavailable where usage cannot be tied to a completed measured interval;
+                measured wall time is shown separately.
               </InstrumentNote>
             )}
           </>
@@ -635,69 +638,81 @@ function runTokenTotal(row: UsageRunToday): number {
   return row.input_tokens + row.output_tokens + row.cache_read_tokens + row.cache_creation_tokens;
 }
 
-const RUN_RATE_COLUMNS: ReadonlyArray<TableColumn<UsageRunToday>> = [
-  { key: 'run', label: 'run', render: (row) => row.run },
-  {
-    key: 'tokens-per-min',
-    label: 'tokens / min',
-    align: 'right',
-    sortable: true,
-    sortValue: (row) => tokensPerMinute(row, row.wall_seconds),
-    render: (row) => {
-      const rate = tokensPerMinute(row, row.wall_seconds);
-      return rate === null ? '—' : formatCompact(rate);
+function runRateColumns(readingComplete: boolean): ReadonlyArray<TableColumn<UsageRunToday>> {
+  return [
+    { key: 'run', label: 'run', render: (row) => row.run },
+    {
+      key: 'tokens-per-min',
+      label: 'tokens / min',
+      align: 'right',
+      sortable: true,
+      sortValue: (row) =>
+        readingComplete && runRateAvailable(row) ? tokensPerMinute(row, row.wall_seconds) : null,
+      render: (row) => {
+        const rate =
+          readingComplete && runRateAvailable(row) ? tokensPerMinute(row, row.wall_seconds) : null;
+        return rate === null ? '—' : formatCompact(rate);
+      },
     },
-  },
-  {
-    key: 'dollars-per-min',
-    label: '$ / min',
-    align: 'right',
-    sortable: true,
-    sortValue: (row) => dollarsPerMinute(row, row.wall_seconds),
-    render: (row) => {
-      const rate = dollarsPerMinute(row, row.wall_seconds);
-      return rate === null ? '—' : formatUsd(rate);
+    {
+      key: 'dollars-per-min',
+      label: '$ / min',
+      align: 'right',
+      sortable: true,
+      sortValue: (row) =>
+        readingComplete && runRateAvailable(row) ? dollarsPerMinute(row, row.wall_seconds) : null,
+      render: (row) => {
+        const rate =
+          readingComplete && runRateAvailable(row) ? dollarsPerMinute(row, row.wall_seconds) : null;
+        return rate === null ? '—' : formatUsd(rate);
+      },
     },
-  },
-  {
-    key: 'tokens',
-    label: 'tokens',
-    align: 'right',
-    sortable: true,
-    sortValue: (row) => runTokenTotal(row),
-    render: (row) => formatCompact(runTokenTotal(row)),
-  },
-  {
-    key: 'cost',
-    label: 'est. cost',
-    align: 'right',
-    sortable: true,
-    sortValue: (row) => row.cost_usd_estimate,
-    render: (row) => formatUsd(row.cost_usd_estimate),
-  },
-  {
-    key: 'wall',
-    label: 'wall',
-    align: 'right',
-    sortable: true,
-    sortValue: (row) => measuredRunWallSeconds(row),
-    render: (row) => {
-      const seconds = measuredRunWallSeconds(row);
-      return seconds === null ? '—' : formatWall(seconds);
+    {
+      key: 'tokens',
+      label: 'tokens',
+      align: 'right',
+      sortable: true,
+      sortValue: (row) => runTokenTotal(row),
+      render: (row) => formatCompact(runTokenTotal(row)),
     },
-  },
-];
+    {
+      key: 'cost',
+      label: 'est. cost',
+      align: 'right',
+      sortable: true,
+      sortValue: (row) => row.cost_usd_estimate,
+      render: (row) => formatUsd(row.cost_usd_estimate),
+    },
+    {
+      key: 'wall',
+      label: 'measured wall',
+      align: 'right',
+      sortable: true,
+      sortValue: (row) => measuredRunWallSeconds(row),
+      render: (row) => {
+        const seconds = measuredRunWallSeconds(row);
+        return seconds === null ? '—' : formatWall(seconds);
+      },
+    },
+  ];
+}
 
 function measuredRunWallSeconds(row: UsageRunToday): number | null {
   return row.invocations > 0 && row.compute_facts === 0 ? null : row.wall_seconds;
 }
 
-function formatRunAggregate(aggregate: AggregateRunRates): string {
+function formatRunAggregate(aggregate: AggregateRunRates, total: number | undefined): string {
   const tokens =
     aggregate.tokensPerMinute === null ? '—' : `${formatCompact(aggregate.tokensPerMinute)}/min`;
   const dollars =
     aggregate.dollarsPerMinute === null ? '—' : `${formatUsd(aggregate.dollarsPerMinute)}/min`;
-  const runs = `${aggregate.runs} run${aggregate.runs === 1 ? '' : 's'}`;
+  const count = `${aggregate.runs} run${aggregate.runs === 1 ? '' : 's'}`;
+  const runs =
+    total === undefined || total < aggregate.runs
+      ? `returned ${count} · full-day scope unknown`
+      : total > aggregate.runs
+        ? `top ${aggregate.runs} of ${total} runs`
+        : `all ${count}`;
   return `aggregate · ${runs} · ${tokens} · ${dollars}`;
 }
 

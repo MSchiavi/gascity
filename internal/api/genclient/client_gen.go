@@ -8698,6 +8698,9 @@ type UsageBody struct {
 	// TodayByRun Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field.
 	TodayByRun *[]UsageRunToday `json:"today_by_run,omitempty"`
 
+	// TodayByRunTotal Number of observed run groups before the today_by_run cap; absent on older servers.
+	TodayByRunTotal *int64 `json:"today_by_run_total,omitempty"`
+
 	// UpdatedAt RFC3339 time at which the aggregate was built.
 	UpdatedAt string `json:"updated_at"`
 }
@@ -8733,6 +8736,9 @@ type UsageRunToday struct {
 
 	// SessionId Session bead id first seen for the run, when attributed.
 	SessionId *string `json:"session_id,omitempty"`
+
+	// TimingComplete True only when all contributing usage has a proven completed wall-clock interval; absent or false means derived rates are unavailable.
+	TimingComplete *bool `json:"timing_complete,omitempty"`
 
 	// Unpriced Facts for the run whose price is unknown.
 	Unpriced int64 `json:"unpriced"`

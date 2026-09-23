@@ -8,6 +8,7 @@ import {
   laneToRing,
   pipelineSegments,
   pipelineWidths,
+  runRateAvailable,
   tokensPerMinute,
 } from './model';
 
@@ -99,6 +100,7 @@ describe('cockpit telemetry derivation', () => {
       wall_seconds: 60,
       cost_usd_estimate: 0.06,
       unpriced: 0,
+      timing_complete: true,
       ...overrides,
     });
     expect(aggregateRunRates([])).toBeNull();
@@ -106,13 +108,13 @@ describe('cockpit telemetry derivation', () => {
       tokensPerMinute: 1800,
       dollarsPerMinute: 0.06,
       runs: 2,
-      unmeasuredWall: false,
+      timingUnknown: false,
     });
     const noWall = aggregateRunRates([row({ wall_seconds: 0 })]);
     expect(noWall?.runs).toBe(1);
     expect(noWall?.tokensPerMinute).toBeNull();
     expect(noWall?.dollarsPerMinute).toBeNull();
-    expect(noWall?.unmeasuredWall).toBe(true);
+    expect(noWall?.timingUnknown).toBe(true);
 
     for (const rows of [
       [
@@ -121,13 +123,17 @@ describe('cockpit telemetry derivation', () => {
       ],
       [row({ compute_facts: 0, wall_seconds: 0 })],
       [row({ wall_seconds: null as unknown as number })],
+      [row({ timing_complete: false })],
+      [row({ timing_complete: undefined })],
     ]) {
       expect(aggregateRunRates(rows)).toMatchObject({
         tokensPerMinute: null,
         dollarsPerMinute: null,
-        unmeasuredWall: true,
+        timingUnknown: true,
       });
     }
+    expect(runRateAvailable(row({}))).toBe(true);
+    expect(runRateAvailable(row({ timing_complete: undefined }))).toBe(false);
   });
 
   it('carries each lane real stage total and retry provenance', () => {

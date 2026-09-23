@@ -99,30 +99,17 @@ export interface AggregateRunRates {
   tokensPerMinute: number | null;
   dollarsPerMinute: number | null;
   runs: number;
-  unmeasuredWall: boolean;
+  timingUnknown: boolean;
 }
 
 /**
  * Aggregate per-run rows into a single tokens/min + dollars/min reading with
  * the summed wall-clock as the rate basis. Null when there are no rows; each
- * rate is null when any contributing row lacks a measured wall-clock.
+ * rate is null when any row lacks proven timing for its usage.
  */
 export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunRates | null {
   if (rows.length === 0) return null;
-  const unmeasuredWall = rows.some((row) => {
-    const contributes =
-      row.invocations > 0 ||
-      row.compute_facts > 0 ||
-      row.input_tokens > 0 ||
-      row.output_tokens > 0 ||
-      row.cache_read_tokens > 0 ||
-      row.cache_creation_tokens > 0 ||
-      row.cost_usd_estimate > 0;
-    return (
-      contributes &&
-      (row.compute_facts === 0 || !Number.isFinite(row.wall_seconds) || row.wall_seconds <= 0)
-    );
-  });
+  const timingUnknown = rows.some((row) => !runRateAvailable(row));
   const totals: UsageTotals = {
     invocations: 0,
     compute_facts: 0,
@@ -143,11 +130,15 @@ export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunR
     totals.cost_usd_estimate += finiteNonNegative(row.cost_usd_estimate);
   }
   return {
-    tokensPerMinute: unmeasuredWall ? null : tokensPerMinute(totals, totals.wall_seconds),
-    dollarsPerMinute: unmeasuredWall ? null : dollarsPerMinute(totals, totals.wall_seconds),
+    tokensPerMinute: timingUnknown ? null : tokensPerMinute(totals, totals.wall_seconds),
+    dollarsPerMinute: timingUnknown ? null : dollarsPerMinute(totals, totals.wall_seconds),
     runs: rows.length,
-    unmeasuredWall,
+    timingUnknown,
   };
+}
+
+export function runRateAvailable(row: UsageRunToday): boolean {
+  return row.timing_complete === true && Number.isFinite(row.wall_seconds) && row.wall_seconds > 0;
 }
 
 const PHASE_STAGE: Record<string, number> = {

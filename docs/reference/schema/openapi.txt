@@ -25254,6 +25254,11 @@
               "null"
             ]
           },
+          "today_by_run_total": {
+            "description": "Number of observed run groups before the today_by_run cap; absent on older servers.",
+            "format": "int64",
+            "type": "integer"
+          },
           "updated_at": {
             "description": "RFC3339 time at which the aggregate was built.",
             "type": "string"
@@ -25315,6 +25320,10 @@
           "session_id": {
             "description": "Session bead id first seen for the run, when attributed.",
             "type": "string"
+          },
+          "timing_complete": {
+            "description": "True only when all contributing usage has a proven completed wall-clock interval; absent or false means derived rates are unavailable.",
+            "type": "boolean"
           },
           "unpriced": {
             "description": "Facts for the run whose price is unknown.",

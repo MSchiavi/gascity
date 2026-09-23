@@ -3206,6 +3206,7 @@ export const zUsageRunToday = z.object({
     output_tokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     run: z.string(),
     session_id: z.string().optional(),
+    timing_complete: z.boolean().optional(),
     unpriced: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     wall_seconds: z.number(),
     worker: z.string().optional()
@@ -3247,6 +3248,7 @@ export const zUsageBody = z.object({
     source: z.enum(['local_estimate', 'unavailable']),
     today: zUsageTotals,
     today_by_run: z.array(zUsageRunToday).nullish(),
+    today_by_run_total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     updated_at: z.string()
 });
 
