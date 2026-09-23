@@ -5660,7 +5660,7 @@ exit 64
 				t.Fatalf("backup result: err=%v, output=%q; want failure=%t and summary %q", runErr, out, tc.wantFailure, tc.wantSummary)
 			}
 			gcLog, err := os.ReadFile(gcLogPath)
-			if err != nil && !(os.IsNotExist(err) && !tc.wantOffsiteMail && !tc.wantFailure) {
+			if err != nil && (!os.IsNotExist(err) || tc.wantOffsiteMail || tc.wantFailure) {
 				t.Fatal(err)
 			}
 			mail := string(gcLog)

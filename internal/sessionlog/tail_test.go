@@ -17,7 +17,11 @@ func TestReadTailWindowAtRespectsSnapshotAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("close session file: %v", err)
+		}
+	})
 	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		t.Fatal(err)
