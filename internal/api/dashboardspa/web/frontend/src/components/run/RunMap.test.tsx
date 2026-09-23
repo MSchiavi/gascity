@@ -174,6 +174,42 @@ function renderActive(lanes: RunLane[]) {
 }
 
 describe('RunMap active expand-in-place (lane-cap expander)', () => {
+  it('keeps a stale card visible without counting it as a non-stale lane or changing census totals', () => {
+    const staleLane: RunLane = {
+      ...activeLane('gc-stale'),
+      stale: true,
+      staleSince: '2026-05-24T12:00:00Z',
+    };
+    const source = runsSource([]);
+    if (source.status === 'error') throw new Error(source.error);
+    source.data.lanes = [staleLane];
+    render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <RunMap
+          source={source}
+          canonicalCounts={{
+            pending: 0,
+            active: 1,
+            waiting: 0,
+            canceling: 0,
+            completed: 0,
+            failed: 0,
+            canceled: 0,
+            skipped: 0,
+          }}
+          now={Date.parse('2026-05-24T12:01:00Z')}
+          showHistory={false}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Active run gc-stale')).toBeTruthy();
+    expect(screen.getByText('Non-stale lanes').nextElementSibling?.textContent).toBe('0');
+    expect(screen.getByText('Non-stale PR').nextElementSibling?.textContent).toBe('0');
+    expect(screen.getByText('Running').nextElementSibling?.textContent).toBe('1');
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('1');
+  });
+
   it('collapses to MAX_VISIBLE_ACTIVE_LANES with a Show-more toggle, no static footnote', () => {
     const lanes = makeActiveLanes(MAX_VISIBLE_ACTIVE_LANES + 1);
     renderActive(lanes);

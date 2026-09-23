@@ -271,8 +271,8 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
     expect(screen.getByText(/2 waiting/)).toBeTruthy();
     expect(screen.getByText(/1 canceling/)).toBeTruthy();
     expect(inFlight.nextElementSibling?.textContent).toBe('4');
-    const detailedLanes = screen.getByText('Detailed lanes');
-    expect(detailedLanes.nextElementSibling?.textContent).toBe('0');
+    const nonStaleLanes = screen.getByText('Non-stale lanes');
+    expect(nonStaleLanes.nextElementSibling?.textContent).toBe('0');
     expect(screen.getByText(/4 open runs have no lane details in this summary/i)).toBeTruthy();
     expect(screen.queryByText(/No formula runs in flight/i)).toBeNull();
   });

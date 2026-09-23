@@ -31,10 +31,10 @@ interface RunMapProps {
 }
 
 const COUNT_LABELS: Array<[keyof RunSummary['runCounts'], string]> = [
-  ['prReview', 'PR lanes'],
-  ['designReview', 'Design lanes'],
-  ['bugfix', 'Bugfix lanes'],
-  ['other', 'Other lanes'],
+  ['prReview', 'Non-stale PR'],
+  ['designReview', 'Non-stale design'],
+  ['bugfix', 'Non-stale bugfix'],
+  ['other', 'Non-stale other'],
 ];
 
 const HISTORICAL_SECTION_ID = 'runs-historical-section';
@@ -335,11 +335,11 @@ function CountsHeader({
   summary: RunSummary | null;
   canonicalCounts?: RunStatusCounts | undefined;
 }) {
-  // Census counts describe run lifecycle. The legacy summary describes only
-  // lanes it could project, so its totals and formula breakdown stay labeled
-  // as lane details instead of being presented as open-run counts.
+  // Census counts describe run lifecycle. The legacy summary's total and
+  // formula breakdown exclude stale lanes, even though stale cards remain
+  // visible for inspection. Keep those counts distinct from open-run counts.
   const openRuns = canonicalOpenRunCount(canonicalCounts);
-  const detailedLanes = summary?.runCounts.total;
+  const nonStaleLanes = summary?.runCounts.total;
   const blocked = summary?.runCounts.blocked ?? 0;
   return (
     <header className="space-y-2">
@@ -347,11 +347,11 @@ function CountsHeader({
         <CountTile label="Queued" value={canonicalCounts?.pending ?? '—'} tone="strong" />
         <CountTile label="Running" value={canonicalCounts?.active ?? '—'} tone="strong" />
         <CountTile label="In flight" value={openRuns ?? '—'} tone="strong" />
-        <CountTile label="Detailed lanes" value={detailedLanes ?? '—'} tone="muted" />
+        <CountTile label="Non-stale lanes" value={nonStaleLanes ?? '—'} tone="muted" />
         {COUNT_LABELS.map(([key, label]) => (
           <CountTile key={key} label={label} value={summary?.runCounts[key] ?? '—'} tone="muted" />
         ))}
-        {blocked > 0 && <CountTile label="Blocked lanes" value={blocked} tone="muted" />}
+        {blocked > 0 && <CountTile label="Blocked lanes (non-stale)" value={blocked} tone="muted" />}
       </div>
     </header>
   );

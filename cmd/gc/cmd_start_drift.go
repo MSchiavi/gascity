@@ -187,6 +187,10 @@ var driftVerifyProbeTimeout = 2 * time.Second
 // the production kill+spawn (or systemctl) side effects.
 var restartHelpersHook = defaultRestartHelpers
 
+// delegatedDriftRestartHook separates restart outcome from readiness checks.
+// Production retains the bounded systemctl executor.
+var delegatedDriftRestartHook = runDelegatedSystemctlTimeout
+
 // readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
 var readSupervisorExePathHook = readSupervisorExePath
 
@@ -342,7 +346,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// try-restart: restart only if the unit is running. The drift
 			// path only fires when a supervisor is alive, and a stopped
 			// delegated unit must stay stopped — its operator owns starts.
-			restartErr = runDelegatedSystemctlTimeout(delegation, "try-restart", delegatedSystemctlJobTimeout)
+			restartErr = delegatedDriftRestartHook(delegation, "try-restart", delegatedSystemctlJobTimeout)
 		} else {
 			restartErr = restartSupervisor(spec, restartHelpersHook())
 		}

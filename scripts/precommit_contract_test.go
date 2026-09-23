@@ -71,30 +71,32 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") {
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG_FILE=") {
 			continue
 		}
 		baseEnv = append(baseEnv, entry)
 	}
 	tests := []struct {
-		name      string
-		cpus      string
-		memoryKiB string
-		makeArgs  []string
-		wantJobs  string
-		cgroup    string
-		limit     string
-		current   string
+		name           string
+		cpus           string
+		memoryKiB      string
+		makeArgs       []string
+		wantJobs       string
+		wantSharedJobs string
+		cgroup         string
+		limit          string
+		current        string
 	}{
-		{name: "large host uses automatic ceiling", cpus: "192", memoryKiB: "536870912", wantJobs: "16"},
-		{name: "memory constrains fanout", cpus: "16", memoryKiB: "12582912", wantJobs: "3"},
-		{name: "cpu constrains fanout", cpus: "2", memoryKiB: "67108864", wantJobs: "2"},
-		{name: "small machine still runs one job", cpus: "8", memoryKiB: "2097152", wantJobs: "1"},
-		{name: "unknown memory preserves safe fallback", cpus: "64", memoryKiB: "0", wantJobs: "3"},
-		{name: "nested cgroup v2 ancestor constrains fanout", cpus: "16", wantJobs: "3", cgroup: "v2", limit: "12884901888", current: "0"},
-		{name: "nested cgroup v1 ancestor constrains fanout", cpus: "16", wantJobs: "2", cgroup: "v1", limit: "8589934592", current: "0"},
-		{name: "hybrid cgroup falls through to v1 memory controller", cpus: "16", wantJobs: "3", cgroup: "hybrid", limit: "12884901888", current: "0"},
-		{name: "exhausted cgroup forces one job", cpus: "16", wantJobs: "1", cgroup: "v2", limit: "4294967296", current: "4294967296"},
+		{name: "large host uses automatic ceiling", cpus: "192", memoryKiB: "536870912", wantJobs: "16", wantSharedJobs: "8"},
+		{name: "memory constrains fanout", cpus: "16", memoryKiB: "12582912", wantJobs: "3", wantSharedJobs: "1"},
+		{name: "cpu constrains fanout", cpus: "2", memoryKiB: "67108864", wantJobs: "2", wantSharedJobs: "1"},
+		{name: "small machine still runs one job", cpus: "8", memoryKiB: "2097152", wantJobs: "1", wantSharedJobs: "1"},
+		{name: "unknown memory preserves safe fallback", cpus: "64", memoryKiB: "0", wantJobs: "3", wantSharedJobs: "1"},
+		{name: "nested cgroup v2 ancestor constrains fanout", cpus: "16", wantJobs: "3", wantSharedJobs: "1", cgroup: "v2", limit: "12884901888", current: "0"},
+		{name: "nested cgroup v1 ancestor constrains fanout", cpus: "16", wantJobs: "2", wantSharedJobs: "1", cgroup: "v1", limit: "8589934592", current: "0"},
+		{name: "hybrid cgroup falls through to v1 memory controller", cpus: "16", wantJobs: "3", wantSharedJobs: "1", cgroup: "hybrid", limit: "12884901888", current: "0"},
+		{name: "exhausted cgroup forces one job", cpus: "16", wantJobs: "1", wantSharedJobs: "1", cgroup: "v2", limit: "4294967296", current: "4294967296"},
 		{name: "explicit override wins", cpus: "192", memoryKiB: "536870912", makeArgs: []string{"LOCAL_TEST_JOBS=7"}, wantJobs: "7"},
 	}
 
@@ -107,20 +109,42 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			// This table exercises the cpu/memory/cgroup axes only; pin loadavg=0
 			// so a live host's real /proc/loadavg can't shrink the expected job
 			// count out from under an unrelated case (ga-04m84s).
-			cmd.Env = append(append([]string(nil), baseEnv...),
+			fixtureEnv := append(append([]string(nil), baseEnv...),
 				"GC_TEST_LOCAL_CPUS="+tt.cpus,
 				"GC_TEST_LOCAL_LOADAVG=0",
-				"GC_PUSH_GATE_NO_CAP=1",
-				"PUSH_GATE_MAX_CONCURRENT=7",
+				"GC_PUSH_GATE_NO_CAP=",
+				"PUSH_GATE_MAX_CONCURRENT=2",
 				"PUSH_GATE_MAX_WAIT_SECONDS=13",
 				"PUSH_GATE_POLL_SECONDS=2",
 				"PUSH_GATE_UNRELATED_SENTINEL=must-not-leak",
 			)
 			if tt.memoryKiB != "" {
-				cmd.Env = append(cmd.Env, "GC_TEST_LOCAL_MEMORY_KIB="+tt.memoryKiB)
+				fixtureEnv = append(fixtureEnv, "GC_TEST_LOCAL_MEMORY_KIB="+tt.memoryKiB)
 			}
 			if tt.cgroup != "" {
-				cmd.Env = append(cmd.Env, localTestCgroupEnv(t, tt.cgroup, tt.limit, tt.current)...)
+				fixtureEnv = append(fixtureEnv, localTestCgroupEnv(t, tt.cgroup, tt.limit, tt.current)...)
+			}
+			cmd.Env = fixtureEnv
+
+			// Execute the canonical detector and shared-slot budget for auto
+			// sizing. An explicit LOCAL_TEST_JOBS value bypasses both in the runner.
+			if len(tt.makeArgs) == 0 {
+				detector := testCommand(filepath.Join(repoRoot, "scripts", "test-local-job-count"))
+				detector.Dir, detector.Env = repoRoot, fixtureEnv
+				rawOut, err := detector.CombinedOutput()
+				if err != nil {
+					t.Fatalf("job detector failed: %v\n%s", err, rawOut)
+				}
+				rawJobs := strings.TrimSpace(string(rawOut))
+				if rawJobs != tt.wantJobs {
+					t.Fatalf("job detector returned %q, want %q", rawJobs, tt.wantJobs)
+				}
+				budget := testCommand("bash", "-c", `source scripts/lib/inner-parallelism.sh; gc_shared_auto_jobs "$1" "$2"`, "budget", rawJobs, "2")
+				budget.Dir = repoRoot
+				sharedOut, err := budget.CombinedOutput()
+				if err != nil || strings.TrimSpace(string(sharedOut)) != tt.wantSharedJobs {
+					t.Fatalf("shared budget = %q, err=%v; want %s", strings.TrimSpace(string(sharedOut)), err, tt.wantSharedJobs)
+				}
 			}
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -133,9 +157,13 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			if !strings.Contains(command, "./scripts/test-local-parallel fast") {
 				t.Fatalf("test-fast-parallel recipe should still dispatch the sharded fast runner:\n%s", command)
 			}
-			wantJobAssignment := " LOCAL_TEST_JOBS=" + tt.wantJobs + " CMD_GC_PROCESS_TOTAL="
+			makeJobs := ""
+			if len(tt.makeArgs) != 0 {
+				makeJobs = tt.wantJobs
+			}
+			wantJobAssignment := " LOCAL_TEST_JOBS=" + makeJobs + " CMD_GC_PROCESS_TOTAL="
 			if !strings.Contains(command, wantJobAssignment) {
-				t.Fatalf("test-fast-parallel job count should be %s:\n%s", tt.wantJobs, command)
+				t.Fatalf("test-fast-parallel should pass LOCAL_TEST_JOBS=%q (empty means runner auto budget):\n%s", makeJobs, command)
 			}
 			for _, key := range []string{
 				"GC_PUSH_GATE_NO_CAP",
@@ -199,26 +227,30 @@ func localTestCgroupEnv(t *testing.T, version, limit, current string) []string {
 }
 
 func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
-	repoRoot := repoRoot(t)
-	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-push"))
-	if err != nil {
-		t.Fatalf("read pre-push hook: %v", err)
-	}
-	content := string(script)
-	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
-		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
-	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
-		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
-	}
-	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
-		content, err := os.ReadFile(filepath.Join(repoRoot, path))
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
+	f := newPrePushFixture(t)
+	writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/usr/bin/env sh
+printf '%s jobs=%s\n' "$*" "${LOCAL_TEST_JOBS-unset}" >> "$MAKE_RECORD"
+`)
+	filteredEnv := f.env[:0]
+	for _, entry := range f.env {
+		if !strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") {
+			filteredEnv = append(filteredEnv, entry)
 		}
-		if !strings.Contains(string(content), "scripts/test-local-job-count") {
-			t.Fatalf("%s must use the canonical machine-aware job detector", path)
-		}
+	}
+	f.env = filteredEnv
+	refLine := "refs/heads/main " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
+	if code, out := f.run(t, refLine); code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); got != "test-fast-parallel jobs=unset\n" {
+		t.Fatalf("pre-push make invocation = %q, want fast suite with unset auto job count", got)
+	}
+	f.env = append(f.env, "LOCAL_TEST_JOBS=7")
+	if code, out := f.run(t, refLine); code != 0 {
+		t.Fatalf("pre-push with override exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); got != "test-fast-parallel jobs=unset\ntest-fast-parallel jobs=7\n" {
+		t.Fatalf("pre-push make invocations = %q, want auto then caller's override", got)
 	}
 }
 
