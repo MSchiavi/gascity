@@ -106,11 +106,28 @@ describe('cockpit telemetry derivation', () => {
       tokensPerMinute: 1800,
       dollarsPerMinute: 0.06,
       runs: 2,
+      unmeasuredWall: false,
     });
     const noWall = aggregateRunRates([row({ wall_seconds: 0 })]);
     expect(noWall?.runs).toBe(1);
     expect(noWall?.tokensPerMinute).toBeNull();
     expect(noWall?.dollarsPerMinute).toBeNull();
+    expect(noWall?.unmeasuredWall).toBe(true);
+
+    for (const rows of [
+      [
+        row({ input_tokens: 1000, compute_facts: 0, wall_seconds: 0 }),
+        row({ run: 'gc-2', input_tokens: 60 }),
+      ],
+      [row({ compute_facts: 0, wall_seconds: 0 })],
+      [row({ wall_seconds: null as unknown as number })],
+    ]) {
+      expect(aggregateRunRates(rows)).toMatchObject({
+        tokensPerMinute: null,
+        dollarsPerMinute: null,
+        unmeasuredWall: true,
+      });
+    }
   });
 
   it('carries each lane real stage total and retry provenance', () => {

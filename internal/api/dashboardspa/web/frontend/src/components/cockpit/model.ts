@@ -99,16 +99,30 @@ export interface AggregateRunRates {
   tokensPerMinute: number | null;
   dollarsPerMinute: number | null;
   runs: number;
+  unmeasuredWall: boolean;
 }
 
 /**
  * Aggregate per-run rows into a single tokens/min + dollars/min reading with
  * the summed wall-clock as the rate basis. Null when there are no rows; each
- * rate is independently null when its basis is missing (no wall-clock) or its
- * numerator is invalid.
+ * rate is null when any contributing row lacks a measured wall-clock.
  */
 export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunRates | null {
   if (rows.length === 0) return null;
+  const unmeasuredWall = rows.some((row) => {
+    const contributes =
+      row.invocations > 0 ||
+      row.compute_facts > 0 ||
+      row.input_tokens > 0 ||
+      row.output_tokens > 0 ||
+      row.cache_read_tokens > 0 ||
+      row.cache_creation_tokens > 0 ||
+      row.cost_usd_estimate > 0;
+    return (
+      contributes &&
+      (row.compute_facts === 0 || !Number.isFinite(row.wall_seconds) || row.wall_seconds <= 0)
+    );
+  });
   const totals: UsageTotals = {
     invocations: 0,
     compute_facts: 0,
@@ -129,9 +143,10 @@ export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunR
     totals.cost_usd_estimate += finiteNonNegative(row.cost_usd_estimate);
   }
   return {
-    tokensPerMinute: tokensPerMinute(totals, totals.wall_seconds),
-    dollarsPerMinute: dollarsPerMinute(totals, totals.wall_seconds),
+    tokensPerMinute: unmeasuredWall ? null : tokensPerMinute(totals, totals.wall_seconds),
+    dollarsPerMinute: unmeasuredWall ? null : dollarsPerMinute(totals, totals.wall_seconds),
     runs: rows.length,
+    unmeasuredWall,
   };
 }
 

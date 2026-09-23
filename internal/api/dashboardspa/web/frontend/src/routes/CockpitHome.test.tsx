@@ -327,26 +327,96 @@ describe('<CockpitHomePage>', () => {
     const usage = (await mocks.cityUsage()) as UsageBody;
     mocks.cityUsage.mockResolvedValue({
       ...usage,
-      today_by_run: [{
-        run: 'gc-live',
-        invocations: 2,
-        compute_facts: 0,
-        input_tokens: 5000,
-        output_tokens: 1000,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
-        wall_seconds: 0,
-        cost_usd_estimate: 0.12,
-        unpriced: 0,
-      }],
+      today_by_run: [
+        {
+          run: 'gc-live',
+          invocations: 2,
+          compute_facts: 0,
+          input_tokens: 5000,
+          output_tokens: 1000,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          wall_seconds: 0,
+          cost_usd_estimate: 0.12,
+          unpriced: 0,
+        },
+      ],
     });
 
     render(router(<CockpitHomePage />));
 
     const row = (await screen.findByRole('cell', { name: 'gc-live' })).closest('tr');
     expect(row).not.toBeNull();
-    expect(within(row as HTMLElement).getAllByRole('cell').at(-1)?.textContent).toBe('—');
-    expect(screen.getByText(/wall time is unavailable until a compute interval completes/i)).toBeTruthy();
+    expect(
+      within(row as HTMLElement)
+        .getAllByRole('cell')
+        .at(-1)?.textContent,
+    ).toBe('—');
+    expect(
+      screen.getByText(/wall time is unavailable until a compute interval completes/i),
+    ).toBeTruthy();
+  });
+
+  it('withholds an aggregate rate when one run has unmeasured wall time', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const measured = {
+      run: 'gc-measured',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 60,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.01,
+      unpriced: 0,
+    };
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run: [
+        { ...measured, run: 'gc-unknown', input_tokens: 1000, compute_facts: 0, wall_seconds: 0 },
+        measured,
+      ],
+    });
+    render(router(<CockpitHomePage />));
+
+    expect(await screen.findByText('aggregate · 2 runs · — · —')).toBeTruthy();
+    expect(screen.queryByText(/1.1K\/min/)).toBeNull();
+  });
+
+  it('withholds aggregate rates for partial or stale usage readings', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const measured = {
+      run: 'gc-measured',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 60,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.01,
+      unpriced: 0,
+    };
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      partial: true,
+      partial_reasons: ['rig unavailable'],
+      today_by_run: [measured],
+    });
+    const partial = render(router(<CockpitHomePage />));
+    expect(await screen.findByText('aggregate · 1 run · — · —')).toBeTruthy();
+    partial.unmount();
+
+    mocks.cityUsage.mockResolvedValue({ ...usage, partial: false, today_by_run: [measured] });
+    const fresh = render(router(<CockpitHomePage />));
+    expect(await screen.findByText('aggregate · 1 run · 60/min · $0.01/min')).toBeTruthy();
+    fresh.unmount();
+
+    mocks.cityUsage.mockRejectedValue(new Error('usage refresh failed'));
+    render(router(<CockpitHomePage />));
+    expect(await screen.findByText('aggregate · 1 run · — · —')).toBeTruthy();
+    expect(screen.getAllByText('usage is stale · refresh failed').length).toBeGreaterThan(0);
   });
 
   it('marks run rates unavailable when the server predates the per-run field', async () => {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,62 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
+
+type missingOrdersBindingState struct{ State }
+
+func (missingOrdersBindingState) OrdersBeadStore() beads.OrdersStore {
+	return beads.OrdersStore{}
+}
+
+type failedOrderGetStore struct{ beads.Store }
+
+func (failedOrderGetStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("binding read failed")
+}
+
+func TestOrderReadsRejectMissingRequiredBindings(t *testing.T) {
+	for _, missing := range []string{"city", "orders"} {
+		t.Run(missing, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cityBeadStore = beads.NewMemStore()
+			fs.ordersBeadStore = beads.NewMemStore()
+			fs.autos = []orders.Order{{Name: "review", Rig: "myrig", Trigger: "cooldown", Interval: "1m"}}
+			var state State = fs
+			if missing == "city" {
+				fs.cityBeadStore = nil
+			} else {
+				state = missingOrdersBindingState{State: fs}
+			}
+			h := newTestCityHandler(t, state)
+			for _, path := range []string{
+				"/orders/check",
+				"/orders/history?scoped_name=review:rig:myrig",
+				"/order/history/any-bead?store_ref=rig:myrig",
+			} {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, path), nil))
+				if w.Code != http.StatusServiceUnavailable {
+					t.Errorf("%s status = %d, want 503; body = %s", path, w.Code, w.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestOrderOutputRejectsEarlierBindingReadError(t *testing.T) {
+	fs := newFakeState(t)
+	city := beads.NewMemStore()
+	ordersStore := beads.NewMemStore()
+	bead := seedClosedOrderRunBead(t, ordersStore, "review", "stored output")
+	fs.cityBeadStore = failedOrderGetStore{Store: city}
+	fs.ordersBeadStore = ordersStore
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+bead.ID), nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+}
 
 // The order-tracking bead is orders class, and on a city whose infrastructure
 // classes are served by their own binding the controller creates it there. Every

@@ -313,6 +313,57 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
     expect(screen.queryByText(/2 queued/)).toBeNull();
   });
 
+  it('keeps canonical counts when lane details fail', async () => {
+    const laneFailure = {
+      source: 'runs',
+      status: 'error',
+      error: 'lane collector unavailable',
+    } satisfies SourceState<RunSummary>;
+    mockLoadRunSummaryPreview.mockResolvedValue(laneFailure);
+    mockLoadRunSummary.mockResolvedValue(laneFailure);
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 2,
+        active: 1,
+        waiting: 0,
+        canceling: 0,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/2 queued · 1 running/)).toBeTruthy();
+    expect(
+      screen.getByText(/run lane details unavailable: lane collector unavailable/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/run counts unavailable/i)).toBeNull();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('3');
+  });
+
+  it('shows canonical counts while lane details load', async () => {
+    mockLoadRunSummaryPreview.mockImplementation(() => new Promise(() => undefined));
+    mockLoadRunSummary.mockImplementation(() => new Promise(() => undefined));
+
+    mount();
+
+    expect(await screen.findByText(/0 queued · 0 running/)).toBeTruthy();
+    expect(screen.getByText(/loading formula run lanes/i)).toBeTruthy();
+    expect(screen.getByText('Loading formula runs.')).toBeTruthy();
+  });
+
+  it('withholds canonical counts while the census loads', async () => {
+    mockRunCensus.mockImplementation(() => new Promise(() => undefined));
+
+    mount();
+
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('—');
+  });
+
   it('withholds cached census counts after a failed refresh', async () => {
     mockRunCensus
       .mockResolvedValueOnce({
@@ -502,6 +553,7 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
       status: 'error',
       error: 'run collector unavailable in test',
     } satisfies SourceState<RunSummary>);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
 
     mount();
     await waitForMount();
@@ -741,6 +793,7 @@ describe('RunsPage — partial lane set (gascity-dashboard-n6f1)', () => {
     expect(marker).toBeTruthy();
     expect(marker.getAttribute('role')).toBe('status');
     expect(live.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/run lane details partial/i)).toBeTruthy();
   });
 
   it('omits the partial signal on a clean direct run source', async () => {

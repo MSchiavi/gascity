@@ -76,12 +76,9 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 	ep := s.state.EventProvider()
 	stores := make([][]workflowStoreInfo, len(aa))
 	for i, a := range aa {
-		if a.Rig != "" && s.state.BeadStore(a.Rig) == nil {
-			return nil, apierr.ServiceUnavailable.Msg("order rig store unavailable for " + a.ScopedName())
-		}
 		infos, err := orderStoreInfosForState(s.state, a)
 		if err != nil {
-			return nil, apierr.ServiceUnavailable.Msg("order stores unavailable for " + a.ScopedName())
+			return nil, apierr.ServiceUnavailable.Msg(err.Error())
 		}
 		for _, info := range infos {
 			if err := cacheLiveOr503(info.store); err != nil {
@@ -240,13 +237,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 	storeInfos, err := orderStoreInfosForState(s.state, orderDef)
 	if err != nil {
-		if errors.Is(err, errNoOrderStores) {
-			return nil, apierr.ServiceUnavailable.Msg(err.Error())
-		}
-		return nil, apierr.Internal.Msg(err.Error())
-	}
-	if orderDef.Rig != "" && s.state.BeadStore(orderDef.Rig) == nil {
-		return nil, apierr.ServiceUnavailable.Msg("order rig store unavailable for " + scopedName)
+		return nil, apierr.ServiceUnavailable.Msg(err.Error())
 	}
 	for _, info := range storeInfos {
 		if err := cacheLiveOr503(info.store); err != nil {
@@ -336,6 +327,9 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	Body orderHistoryDetailResponse
 }, error,
 ) {
+	if _, err := orderStoreInfosForState(s.state, orders.Order{}); err != nil {
+		return nil, apierr.ServiceUnavailable.Msg(err.Error())
+	}
 	// The bead this reads is an order-tracking bead, which on a split city lives in
 	// the orders binding. workflowStores leads with the GRAPH binding, so without
 	// the orders leg this only finds one because the shape this build serves
@@ -357,7 +351,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 		if errors.Is(err, errNoOrderStores) {
 			return nil, apierr.ServiceUnavailable.Msg(err.Error())
 		}
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, apierr.StoreUnavailable.Msg(err.Error())
 	}
 	b := result.bead
 
@@ -390,32 +384,36 @@ type orderHistoryStoreBead struct {
 
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
 	cityName := workflowCityScopeRef(state.CityName())
+	cityStore := state.CityBeadStore()
+	if cityStore == nil {
+		return nil, errors.New("city bead store unavailable")
+	}
+	if state.OrdersBeadStore().Store == nil {
+		return nil, errors.New("orders bead store unavailable")
+	}
 	infos := make([]workflowStoreInfo, 0, 2)
 	if strings.TrimSpace(a.Rig) != "" {
-		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
-			infos = append(infos, workflowStoreInfo{
-				ref:       "rig:" + a.Rig,
-				scopeKind: beadmeta.ScopeKindRig,
-				scopeRef:  a.Rig,
-				store:     rigStore,
-			})
+		rigStore := state.BeadStore(a.Rig)
+		if rigStore == nil {
+			return nil, fmt.Errorf("order rig store unavailable for %s", a.ScopedName())
 		}
-	}
-
-	if cityStore := state.CityBeadStore(); cityStore != nil {
 		infos = append(infos, workflowStoreInfo{
-			ref:       "city:" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     cityStore,
+			ref:       "rig:" + a.Rig,
+			scopeKind: beadmeta.ScopeKindRig,
+			scopeRef:  a.Rig,
+			store:     rigStore,
 		})
 	}
 
+	infos = append(infos, workflowStoreInfo{
+		ref:       "city:" + cityName,
+		scopeKind: beadmeta.ScopeKindCity,
+		scopeRef:  cityName,
+		store:     cityStore,
+	})
+
 	infos = appendOrdersClassStoreInfo(infos, state, cityName)
 
-	if len(infos) == 0 {
-		return nil, errNoOrderStores
-	}
 	return infos, nil
 }
 
@@ -587,7 +585,6 @@ func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) 
 		return orderHistoryStoreBead{}, errNoOrderStores
 	}
 
-	var lastErr error
 	for _, info := range infos {
 		if info.store == nil {
 			continue
@@ -599,10 +596,7 @@ func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) 
 		if errors.Is(err, beads.ErrNotFound) {
 			continue
 		}
-		lastErr = err
-	}
-	if lastErr != nil {
-		return orderHistoryStoreBead{}, lastErr
+		return orderHistoryStoreBead{}, fmt.Errorf("get %s: %w", info.ref, err)
 	}
 	return orderHistoryStoreBead{}, beads.ErrNotFound
 }

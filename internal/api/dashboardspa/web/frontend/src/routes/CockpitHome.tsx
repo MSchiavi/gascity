@@ -140,8 +140,11 @@ export function CockpitHomePage() {
   // has no runs, and the rate table otherwise.
   const runRows = usageAvailable ? (usage.today_by_run ?? null) : null;
   const runAggregate = runRows === null ? null : aggregateRunRates(runRows);
-  const hasUnmeasuredRunWall =
-    runRows?.some((row) => row.invocations > 0 && row.compute_facts === 0) ?? false;
+  const aggregateRatesAvailable = !usageReading.stale && usage?.partial !== true;
+  const visibleRunAggregate =
+    runAggregate === null || aggregateRatesAvailable
+      ? runAggregate
+      : { ...runAggregate, tokensPerMinute: null, dollarsPerMinute: null };
   const activeSessionsFromStatus = status?.session_counts_detail?.active;
   const activeSessions =
     activeSessionsFromStatus ??
@@ -432,12 +435,16 @@ export function CockpitHomePage() {
               rowKey={(row) => row.run}
               empty="no runs recorded today"
             />
-            {runAggregate !== null && (
-              <InstrumentNote>{formatRunAggregate(runAggregate)}</InstrumentNote>
+            {visibleRunAggregate !== null && (
+              <InstrumentNote>{formatRunAggregate(visibleRunAggregate)}</InstrumentNote>
             )}
-            {hasUnmeasuredRunWall && (
+            {(usageReading.stale || usage?.partial) && usageNote && (
+              <InstrumentNote>{usageNote}</InstrumentNote>
+            )}
+            {runAggregate?.unmeasuredWall && (
               <InstrumentNote>
-                Wall time is unavailable until a compute interval completes; per-run rates need measured wall time.
+                Wall time is unavailable until a compute interval completes; per-run rates need
+                measured wall time.
               </InstrumentNote>
             )}
           </>

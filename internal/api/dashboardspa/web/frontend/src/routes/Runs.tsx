@@ -194,20 +194,27 @@ function runSynopsis(
   data: SourceState<RunSummary> | undefined,
   canonicalCounts: RunStatusCounts | undefined,
 ): string {
-  if (data === undefined) return 'Loading formula run lanes.';
-
-  if (data.status !== 'error') {
-    if (canonicalCounts !== undefined) {
-      const states = [
-        `${canonicalCounts.pending} queued`,
-        `${canonicalCounts.active} running`,
-        ...(canonicalCounts.waiting > 0 ? [`${canonicalCounts.waiting} waiting`] : []),
-        ...(canonicalCounts.canceling > 0 ? [`${canonicalCounts.canceling} canceling`] : []),
-      ];
-      return `${states.join(' · ')}. ${RUN_PHASE_GRAMMAR}`;
-    }
-    return `${data.data.totalActive} non-stale active lanes; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
+  if (canonicalCounts !== undefined) {
+    const states = [
+      `${canonicalCounts.pending} queued`,
+      `${canonicalCounts.active} running`,
+      ...(canonicalCounts.waiting > 0 ? [`${canonicalCounts.waiting} waiting`] : []),
+      ...(canonicalCounts.canceling > 0 ? [`${canonicalCounts.canceling} canceling`] : []),
+    ];
+    const laneNote =
+      data === undefined
+        ? 'Loading formula run lanes. '
+        : data.status === 'error'
+          ? `Run lane details unavailable: ${data.error}. `
+          : data.data.lanesPartial
+            ? 'Run lane details partial. '
+            : '';
+    return `${states.join(' · ')}. ${laneNote}${RUN_PHASE_GRAMMAR}`;
   }
-
+  if (data === undefined) return 'Loading formula run lanes; canonical state counts unavailable.';
+  if (data.status !== 'error') {
+    const laneNote = data.data.lanesPartial ? ' Run lane details partial.' : '';
+    return `${data.data.totalActive} non-stale active lanes; canonical state counts unavailable.${laneNote} ${RUN_PHASE_GRAMMAR}`;
+  }
   return `Run counts unavailable: ${data.error}. ${RUN_PHASE_GRAMMAR}`;
 }
