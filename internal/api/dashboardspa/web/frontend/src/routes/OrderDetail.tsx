@@ -62,7 +62,7 @@ function OrderDetailContent({ city, scopedName }: { city: string | null; scopedN
   }, [orderSource, historySource]);
   useVisibleRefresh(refresh, 30_000);
 
-  const order = orderSource.data ?? null;
+  const order = orderSource.error === null ? (orderSource.data ?? null) : null;
   const history = historySource.data ?? [];
   const historyReady =
     historySource.data !== undefined && !historySource.loading && historySource.error === null;
@@ -88,9 +88,7 @@ function OrderDetailContent({ city, scopedName }: { city: string | null; scopedN
     <section>
       <PageHeader
         title={order?.name ?? scopedName}
-        synopsis={
-          order?.description ?? (order === null && error === null ? 'Loading order.' : null)
-        }
+        synopsis={order?.description ?? (orderSource.loading ? 'Loading order.' : null)}
         meta={
           <>
             {error && (
@@ -115,10 +113,14 @@ function OrderDetailContent({ city, scopedName }: { city: string | null; scopedN
         }
       />
 
-      {order === null ? (
-        error === null && <p className="text-body text-fg-muted italic">Loading order.</p>
-      ) : (
-        <div className="space-y-10">
+      <div className="space-y-10">
+        {order === null ? (
+          <p className="text-body text-fg-muted italic">
+            {orderSource.error === null
+              ? 'Loading order.'
+              : 'Current order definition unavailable. It may have been removed.'}
+          </p>
+        ) : (
           <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Status">
               {order.enabled ? (
@@ -136,39 +138,39 @@ function OrderDetailContent({ city, scopedName }: { city: string | null; scopedN
             <Field label="Check">{order.check ?? '—'}</Field>
             <Field label="Pool">{order.pool ?? '—'}</Field>
           </dl>
+        )}
 
-          <section>
-            <h2 className="text-label uppercase tracking-wider text-fg-muted mb-3">Recent runs</h2>
-            {historySource.error !== null ? (
-              <p className="text-body text-fg-muted italic">History unavailable.</p>
-            ) : historyReady ? (
-              <Table
-                columns={historyColumns(now, visibleOutput, (entry) =>
-                  setSelectedOutput(entry === null ? null : { city, scopedName, entry }),
-                )}
-                rows={history}
-                rowKey={historyRowKey}
-                empty="No recorded runs."
-              />
-            ) : (
-              <p className="text-body text-fg-muted italic">Loading history.</p>
-            )}
-            {visibleOutput !== null && (
-              <OrderOutputViewer
-                key={JSON.stringify([
-                  city,
-                  scopedName,
-                  visibleOutput.store_ref,
-                  visibleOutput.bead_id,
-                ])}
-                city={city}
-                scopedName={scopedName}
-                entry={visibleOutput}
-              />
-            )}
-          </section>
-        </div>
-      )}
+        <section>
+          <h2 className="text-label uppercase tracking-wider text-fg-muted mb-3">Recent runs</h2>
+          {historySource.error !== null ? (
+            <p className="text-body text-fg-muted italic">History unavailable.</p>
+          ) : historyReady ? (
+            <Table
+              columns={historyColumns(now, visibleOutput, (entry) =>
+                setSelectedOutput(entry === null ? null : { city, scopedName, entry }),
+              )}
+              rows={history}
+              rowKey={historyRowKey}
+              empty="No recorded runs."
+            />
+          ) : (
+            <p className="text-body text-fg-muted italic">Loading history.</p>
+          )}
+          {visibleOutput !== null && (
+            <OrderOutputViewer
+              key={JSON.stringify([
+                city,
+                scopedName,
+                visibleOutput.store_ref,
+                visibleOutput.bead_id,
+              ])}
+              city={city}
+              scopedName={scopedName}
+              entry={visibleOutput}
+            />
+          )}
+        </section>
+      </div>
     </section>
   );
 }

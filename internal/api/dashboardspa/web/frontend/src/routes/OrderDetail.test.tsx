@@ -17,7 +17,7 @@ let mockOrder: SupervisorOrder | null = null;
 let mockHistory: SupervisorOrderHistoryEntry[] = [];
 let mockOrdersByName: Record<string, SupervisorOrder> = {};
 let mockHistoryByName: Record<string, SupervisorOrderHistoryEntry[]> = {};
-let orderMode: 'ok' | 'fail' | 'pending' = 'ok';
+let orderMode: 'ok' | 'fail' | 'not-found' | 'pending' = 'ok';
 let historyMode: 'ok' | 'fail' | 'pending' = 'ok';
 let outputMode: 'ok' | 'pending' = 'ok';
 let releaseOrder: (() => void) | null = null;
@@ -31,6 +31,7 @@ vi.mock('../supervisor/orderReads', () => ({
       await new Promise<void>((resolve) => {
         releaseOrder = resolve;
       });
+    if (orderMode === 'not-found') throw new Error('404 order not found');
     if (orderMode === 'fail' || mockOrder === null) throw new Error('order unavailable');
     return mockOrdersByName[name] ?? mockOrder;
   }),
@@ -307,13 +308,69 @@ describe('OrderDetailPage', () => {
     expect(screen.queryByText('No recorded runs.')).toBeNull();
   });
 
-  it('does not claim empty history while order detail is loading', async () => {
+  it('shows completed history while the order definition is loading', async () => {
     orderMode = 'pending';
     renderDetail();
     expect(screen.getAllByText('Loading order.').length).toBeGreaterThan(0);
-    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    expect(await screen.findByText('No recorded runs.')).toBeDefined();
     await act(async () => {
       releaseOrder?.();
+    });
+    expect(await screen.findByText('Sweep the triage queue.')).toBeDefined();
+  });
+
+  it('shows retained history and output when the order definition returns 404', async () => {
+    orderMode = 'not-found';
+    mockHistory = [
+      historyEntry({
+        name: 'retired',
+        scoped_name: 'retired:rig:old',
+        store_ref: 'orders:test-city',
+        has_output: true,
+      }),
+    ];
+    renderDetail('retired%3Arig%3Aold');
+
+    expect(
+      await screen.findByText('Current order definition unavailable. It may have been removed.'),
+    ).toBeDefined();
+    expect(await screen.findByText('bd-1')).toBeDefined();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    expect(screen.queryByText('Status')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View output' }));
+    expect(await screen.findByText('backup completed')).toBeDefined();
+    expect(vi.mocked(getSupervisorOrderHistoryDetail)).toHaveBeenCalledWith(
+      'bd-1',
+      'orders:test-city',
+    );
+  });
+
+  it('reports both definition and history failures without claiming empty history', async () => {
+    orderMode = 'fail';
+    historyMode = 'fail';
+    renderDetail();
+
+    expect(
+      await screen.findByText('Current order definition unavailable. It may have been removed.'),
+    ).toBeDefined();
+    expect(await screen.findByText('History unavailable.')).toBeDefined();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('order unavailable');
+    expect(screen.getByRole('alert').textContent).toContain('history unavailable');
+  });
+
+  it('shows empty retained history only after a successful read', async () => {
+    orderMode = 'not-found';
+    historyMode = 'pending';
+    renderDetail('retired%3Arig%3Aold');
+
+    expect(
+      await screen.findByText('Current order definition unavailable. It may have been removed.'),
+    ).toBeDefined();
+    expect(screen.getByText('Loading history.')).toBeDefined();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    await act(async () => {
+      releaseHistory?.();
     });
     expect(await screen.findByText('No recorded runs.')).toBeDefined();
   });
