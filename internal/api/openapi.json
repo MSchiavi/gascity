@@ -5268,6 +5268,9 @@
           "name": {
             "type": "string"
           },
+          "outcome": {
+            "type": "string"
+          },
           "rig": {
             "type": "string"
           },

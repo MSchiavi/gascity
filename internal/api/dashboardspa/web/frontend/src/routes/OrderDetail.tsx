@@ -167,8 +167,13 @@ function historyColumns(
       key: 'outcome',
       label: 'Outcome',
       render: (entry) =>
-        entry.error !== undefined && entry.error !== '' ? (
-          <StatusBadge tone="stuck" label={entry.error} />
+        entry.outcome !== undefined && entry.outcome !== '' ? (
+          <StatusBadge
+            tone={
+              entry.outcome === 'success' ? 'ok' : entry.outcome === 'failed' ? 'stuck' : 'neutral'
+            }
+            label={entry.outcome}
+          />
         ) : (
           <span className="text-fg-muted">—</span>
         ),

@@ -14,7 +14,8 @@ import { OrdersPage } from './Orders';
 let mockOrders: SupervisorOrder[] = [];
 let mockChecks: SupervisorOrderCheck[] = [];
 let ordersMode: 'ok' | 'fail' = 'ok';
-let checksMode: 'ok' | 'fail' = 'ok';
+let checksMode: 'ok' | 'fail' | 'pending' = 'ok';
+let releaseChecks: (() => void) | null = null;
 
 vi.mock('../supervisor/orderReads', () => ({
   listSupervisorOrders: vi.fn(async () => {
@@ -23,6 +24,11 @@ vi.mock('../supervisor/orderReads', () => ({
   }),
   listSupervisorOrderChecks: vi.fn(async () => {
     if (checksMode === 'fail') throw new Error('checks unavailable');
+    if (checksMode === 'pending') {
+      await new Promise<void>((resolve) => {
+        releaseChecks = resolve;
+      });
+    }
     return mockChecks;
   }),
 }));
@@ -66,6 +72,7 @@ describe('OrdersPage', () => {
     mockChecks = [];
     ordersMode = 'ok';
     checksMode = 'ok';
+    releaseChecks = null;
   });
 
   afterEach(() => {
@@ -85,9 +92,9 @@ describe('OrdersPage', () => {
     ];
     renderPage();
 
-    expect(
-      (await screen.findByRole('link', { name: 'triage-sweep' })).getAttribute('href'),
-    ).toBe('/orders/triage-sweep');
+    expect((await screen.findByRole('link', { name: 'triage-sweep' })).getAttribute('href')).toBe(
+      '/orders/triage-sweep',
+    );
     expect(screen.getByRole('link', { name: 'farmer-sweep' }).getAttribute('href')).toBe(
       '/orders/farmer-sweep%3Arig%3Ademo-repo',
     );
@@ -161,5 +168,36 @@ describe('OrdersPage', () => {
         vi.mocked(listSupervisorOrderChecks).mock.calls.length;
       expect(callsAfter).toBeGreaterThan(callsBefore);
     });
+  });
+
+  it('withholds due counts while checks are loading', async () => {
+    mockOrders = [order()];
+    checksMode = 'pending';
+    renderPage();
+
+    expect(await screen.findByRole('link', { name: 'triage-sweep' })).toBeDefined();
+    expect(screen.getByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/0 due now/)).toBeNull();
+    await act(async () => {
+      releaseChecks?.();
+    });
+    expect(await screen.findByText(/0 due now/)).toBeDefined();
+  });
+
+  it('withholds stale due counts after a failed refresh', async () => {
+    mockOrders = [order()];
+    mockChecks = [check({ due: true, reason: 'due now' })];
+    renderPage();
+    expect(await screen.findByText(/1 due now/)).toBeDefined();
+
+    checksMode = 'fail';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+
+    expect(await screen.findByRole('alert')).toBeDefined();
+    expect(screen.getByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/1 due now/)).toBeNull();
+    expect(screen.queryByText(/^due now$/)).toBeNull();
   });
 });

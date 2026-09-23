@@ -2098,6 +2098,7 @@ export type OrderHistoryEntry = {
     has_output: boolean;
     labels: Array<string> | null;
     name: string;
+    outcome?: string;
     rig?: string;
     scoped_name: string;
     signal?: string;

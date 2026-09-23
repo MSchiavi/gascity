@@ -5459,6 +5459,59 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 }
 
+func TestBackupScriptDistinguishesDiscoveryFailureFromEmptyListing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		queryExit  int
+		wantFailed bool
+	}{
+		{name: "query failed", queryExit: 17, wantFailed: true},
+		{name: "empty listing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, binDir := t.TempDir(), t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			gcLogPath := writeDogFakeGC(t, binDir)
+			doltLogPath := filepath.Join(binDir, "dolt.log")
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf 'dolt %%s\n' "$*" >> %s
+if [ "${1:-}" = version ]; then
+  printf 'dolt version 2.1.0\n'
+  exit 0
+fi
+case "$*" in
+  *"SHOW DATABASES"*)
+    if [ %d -ne 0 ]; then printf 'database unavailable\n' >&2; exit %d; fi
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 64
+`, shellQuote(doltLogPath), tc.queryExit, tc.queryExit))
+
+			out, err := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+			if (err != nil) != tc.wantFailed {
+				t.Fatalf("exit error = %v, want failure %t; output:\n%s", err, tc.wantFailed, out)
+			}
+			if tc.wantFailed {
+				if !strings.Contains(out, "discovery failed") || strings.Contains(out, "no databases found") {
+					t.Fatalf("discovery failure misreported:\n%s", out)
+				}
+				mail, err := os.ReadFile(gcLogPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(mail), "Dolt backup: database discovery failed") {
+					t.Fatalf("discovery failure not escalated:\n%s", mail)
+				}
+			} else if !strings.Contains(out, "no databases found") {
+				t.Fatalf("empty listing misreported:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")

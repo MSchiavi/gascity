@@ -2737,6 +2737,7 @@ type OrderHistoryEntry struct {
 	HasOutput     bool      `json:"has_output"`
 	Labels        *[]string `json:"labels"`
 	Name          string    `json:"name"`
+	Outcome       *string   `json:"outcome,omitempty"`
 	Rig           *string   `json:"rig,omitempty"`
 	ScopedName    string    `json:"scoped_name"`
 	Signal        *string   `json:"signal,omitempty"`

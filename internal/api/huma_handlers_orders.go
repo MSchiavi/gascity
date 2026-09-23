@@ -255,6 +255,11 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
+		if run, ok := orders.RunFromTrackingBead(b); ok {
+			if outcome := run.Outcome.Display(); outcome != "" {
+				entry.Outcome = &outcome
+			}
+		}
 
 		gate := convergence.GateOutputFromMetadata(b.Metadata)
 		if gate.DurationMs != "" {
@@ -291,6 +296,7 @@ type orderHistoryEntry struct {
 	Labels        []string `json:"labels"`
 	DurationMs    *string  `json:"duration_ms,omitempty"`
 	ExitCode      *string  `json:"exit_code,omitempty"`
+	Outcome       *string  `json:"outcome,omitempty"`
 	Signal        *string  `json:"signal,omitempty"`
 	Error         *string  `json:"error,omitempty"`
 	WispRootID    *string  `json:"wisp_root_id,omitempty"`

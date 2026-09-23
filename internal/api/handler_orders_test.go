@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1121,6 +1122,72 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 	if resp.Entries[0].Rig != "myrig" {
 		t.Fatalf("rig = %q, want myrig", resp.Entries[0].Rig)
+	}
+}
+
+func TestHandleOrderHistoryProjectsStoredOutcomesWithoutOutput(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{{Name: "nightly-review", Exec: "scripts/nightly.sh"}}
+	wants := []struct {
+		labels  []string
+		outcome string
+	}{
+		{labels: []string{"exec"}, outcome: "success"},
+		{labels: []string{"exec-failed"}, outcome: "failed"},
+		{labels: nil, outcome: ""},
+	}
+	byID := make(map[string]string, len(wants))
+	for _, want := range wants {
+		b, err := fs.cityBeadStore.Create(beads.Bead{
+			Title:    "nightly-review tracking",
+			Labels:   append([]string{"order-run:nightly-review"}, want.labels...),
+			Metadata: map[string]string{"convergence.gate_stdout": "private output"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID[b.ID] = want.outcome
+	}
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "private output") {
+		t.Fatalf("history leaked stored output: %s", w.Body.String())
+	}
+	var resp struct {
+		Entries []struct {
+			BeadID     string  `json:"bead_id"`
+			StoreRef   string  `json:"store_ref"`
+			ScopedName string  `json:"scoped_name"`
+			Outcome    *string `json:"outcome"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Entries) != len(wants) {
+		t.Fatalf("entries = %+v", resp.Entries)
+	}
+	for _, entry := range resp.Entries {
+		want, ok := byID[entry.BeadID]
+		if !ok {
+			t.Fatalf("unexpected bead %q", entry.BeadID)
+		}
+		if entry.StoreRef != "city:test-city" || entry.ScopedName != "nightly-review" {
+			t.Fatalf("wrong history identity: %+v", entry)
+		}
+		if want == "" {
+			if entry.Outcome != nil {
+				t.Fatalf("unrecorded outcome = %q", *entry.Outcome)
+			}
+		} else if entry.Outcome == nil || *entry.Outcome != want {
+			t.Fatalf("outcome for %q = %v, want %q", entry.BeadID, entry.Outcome, want)
+		}
 	}
 }
 

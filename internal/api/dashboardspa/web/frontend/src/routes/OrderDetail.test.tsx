@@ -176,19 +176,22 @@ describe('OrderDetailPage', () => {
 
   it('renders recent run history with duration and exit code', async () => {
     mockHistory = [
-      historyEntry(),
+      historyEntry({ outcome: 'success' }),
       historyEntry({
         bead_id: 'bd-2',
         duration_ms: '5000',
         exit_code: '1',
-        error: 'check timed out',
+        outcome: 'failed',
       }),
+      historyEntry({ bead_id: 'bd-3', exit_code: undefined }),
     ];
     renderDetail();
 
     expect(await screen.findByText('bd-1')).toBeDefined();
-    expect(screen.getByText('45.0s')).toBeDefined();
-    expect(screen.getByText('check timed out')).toBeDefined();
+    expect(screen.getAllByText('45.0s')).toHaveLength(2);
+    expect(screen.getByText('success')).toBeDefined();
+    expect(screen.getByText('failed')).toBeDefined();
+    expect(screen.getByText('bd-3').closest('tr')?.textContent).toContain('—');
   });
 
   it('renders an empty history state', async () => {

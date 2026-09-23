@@ -244,8 +244,20 @@ acquire_backup_lock
 if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
     DATABASES=$(echo "$GC_BACKUP_DATABASES" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
 else
-    ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | \
-        grep -viE "$SYSTEM_DBS" || true)
+    if DISCOVERY_OUTPUT=$(dolt_sql -r csv -q "SHOW DATABASES" 2>&1); then
+        ALL_DBS=$(printf '%s\n' "$DISCOVERY_OUTPUT" | tail -n +2 | grep -viE "$SYSTEM_DBS" || true)
+    else
+        discovery_status=$?
+        dolt_escalate \
+            "Dolt backup: database discovery failed [HIGH]" \
+            "Skipping backup sync: SHOW DATABASES failed (exit $discovery_status). Backup coverage could not be determined." \
+            2>/dev/null || true
+        SUMMARY="backup — database discovery failed (exit $discovery_status)"
+        dolt_notify_done "$SUMMARY"
+        echo "backup: $SUMMARY" >&2
+        printf '%s\n' "$DISCOVERY_OUTPUT" >&2
+        exit 1
+    fi
     DATABASES=""
     for db in $ALL_DBS; do
         if [ -d "$DOLT_DATA_DIR/$db/.dolt" ]; then

@@ -956,6 +956,7 @@ export const zOrderHistoryEntry = z.object({
     has_output: z.boolean(),
     labels: z.array(z.string()).nullable(),
     name: z.string(),
+    outcome: z.string().optional(),
     rig: z.string().optional(),
     scoped_name: z.string(),
     signal: z.string().optional(),
