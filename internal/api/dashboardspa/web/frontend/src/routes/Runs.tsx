@@ -203,7 +203,7 @@ function runSynopsis(
       ];
       return `${states.join(' · ')}. ${RUN_PHASE_GRAMMAR}`;
     }
-    return `${data.data.totalActive} runs in flight; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
+    return `${data.data.totalActive} non-stale runs in flight; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
   }
 
   return `Run counts unavailable: ${data.error}. ${RUN_PHASE_GRAMMAR}`;

@@ -251,6 +251,21 @@ async function waitForMount() {
 }
 
 describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
+  it('labels the fallback count as non-stale when a stale lane is visible', async () => {
+    const source = buildRunSource('stale');
+    const summary = requireRunData(source);
+    summary.lanes = [activeLane({ title: 'Stale formula run' })];
+    summary.totalActive = 0;
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
+
+    mount();
+
+    expect(await screen.findByText('Stale formula run')).toBeTruthy();
+    expect(screen.getByText(/0 non-stale runs in flight; canonical state counts unavailable/i)).toBeTruthy();
+  });
+
   it('keeps canonical open-run counts separate from unavailable lane details', async () => {
     mockRunCensus.mockResolvedValue({
       status_counts: {

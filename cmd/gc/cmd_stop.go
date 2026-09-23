@@ -345,6 +345,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		// Controller handled the shutdown — still stop bead store below.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		return 0
 	case controllerStopDefinitePreEntryUnavailable:
@@ -411,7 +412,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal warning.
+		return 1
 	}
 
 	return code

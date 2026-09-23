@@ -87,16 +87,14 @@ func ExtractMuseTailUsage(path string) ([]TailUsage, error) {
 	return parseMuseTailUsage(lines), nil
 }
 
-// ExtractMuseTailUsageSince grows a bounded transcript window to the start of
-// the file or the 16 MiB cap. A replayed cursor record near the tail could make the
-// scan stop before its first occurrence and hide later invocations. Callers
-// still filter entries at or before cursorID and deduplicate facts.
+// ExtractMuseTailUsageSince grows a bounded transcript window until it finds
+// the cursor, reaches the start of the file, or reaches the 16 MiB cap.
+// Callers still filter entries at or before cursorID and deduplicate facts.
 func ExtractMuseTailUsageSince(path, cursorID string) ([]TailUsage, error) {
 	return extractMuseTailUsageSince(path, cursorID, maxUsageScanBytes)
 }
 
-// extractMuseTailUsageSince accepts a smaller cap for focused cap tests.
-func extractMuseTailUsageSince(path, _ string, maxScanBytes int64) ([]TailUsage, error) {
+func extractMuseTailUsageSince(path, cursorID string, maxScanBytes int64) ([]TailUsage, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -107,18 +105,39 @@ func extractMuseTailUsageSince(path, _ string, maxScanBytes int64) ([]TailUsage,
 	if err != nil {
 		return nil, err
 	}
-	data, _, truncated, err := readTailWindowAt(f, size, maxScanBytes)
-	if err != nil {
-		return nil, err
+	for window := min(int64(tailChunkSize), maxScanBytes); ; window = min(window*2, maxScanBytes) {
+		data, _, truncated, err := readTailWindowAt(f, size, window)
+		if err != nil {
+			return nil, err
+		}
+		lines, err := splitLines(data)
+		if err != nil {
+			return nil, err
+		}
+		usages := parseMuseTailUsage(lines)
+		if !truncated || (cursorID != "" && containsCursor(usages, cursorID) && !museCursorMayBeReplay(usages, cursorID)) {
+			return usages, nil
+		}
+		if window == maxScanBytes {
+			log.Printf("sessionlog: muse usage scan cap reached path=%q window_bytes=%d cursor=%q; older invocations are not returned", path, window, cursorID)
+			return usages, nil
+		}
 	}
-	lines, err := splitLines(data)
-	if err != nil {
-		return nil, err
+}
+
+func museCursorMayBeReplay(usages []TailUsage, cursorID string) bool {
+	for i, usage := range usages {
+		if usage.MessageID != cursorID && usage.EntryUUID != cursorID {
+			continue
+		}
+		for _, earlier := range usages[:i] {
+			if earlier.Timestamp.After(usage.Timestamp) {
+				return true
+			}
+		}
+		return false
 	}
-	if truncated {
-		log.Printf("sessionlog: muse usage scan cap reached path=%q window_bytes=%d; older invocations are not returned", path, maxScanBytes)
-	}
-	return parseMuseTailUsage(lines), nil
+	return false
 }
 
 // ExtractMuseTailUsageFromSearchPaths reads muse tail usage only after

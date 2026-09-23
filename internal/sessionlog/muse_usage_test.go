@@ -188,6 +188,20 @@ func TestExtractMuseTailUsageSinceRecoversBeyondFixedTail(t *testing.T) {
 	}
 }
 
+func TestExtractMuseTailUsageSinceStopsAtRecentCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		strings.Repeat("x", tailChunkSize+1),
+		museModelCompletedLine(2, "rec-2", "run-2", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+		museModelCompletedLine(3, "rec-3", "run-3", 1789892400000000, "muse-spark-1.3", 300, 30, 0, 0, 0, 0),
+	})
+	usages, err := ExtractMuseTailUsageSince(path, "run-2")
+	if err != nil || len(usages) != 2 || usages[0].MessageID != "run-2" || usages[1].MessageID != "run-3" {
+		t.Fatalf("recent cursor: usages = %+v, err = %v", usages, err)
+	}
+}
+
 func TestExtractMuseTailUsageSincePartialAppendAndDuplicate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	first := museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0)

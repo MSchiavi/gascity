@@ -120,6 +120,14 @@ describe('OrderDetailPage', () => {
     );
   });
 
+  it('preserves percent escapes in a decoded order name', async () => {
+    renderDetail('sweep%252Farchive');
+
+    await screen.findByText('Sweep the triage queue.');
+    expect(vi.mocked(getSupervisorOrder)).toHaveBeenCalledWith('sweep%2Farchive');
+    expect(vi.mocked(listSupervisorOrderHistory)).toHaveBeenCalledWith('sweep%2Farchive');
+  });
+
   it('renders recent run history with duration and exit code', async () => {
     mockHistory = [
       historyEntry(),

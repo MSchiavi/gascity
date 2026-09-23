@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useCallback, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { Button } from '../components/Button';
 import { Field } from '../components/Field';
 import { PageHeader } from '../components/PageHeader';
@@ -23,14 +23,14 @@ import {
 // config, and recent run history.
 
 export function OrderDetailPage() {
-  const { name = '' } = useParams<{ name: string }>();
-  const scopedName = useMemo(() => {
-    try {
-      return decodeURIComponent(name);
-    } catch {
-      return name;
-    }
-  }, [name]);
+  const { pathname } = useLocation();
+  const rawName = pathname.slice(pathname.lastIndexOf('/') + 1);
+  let scopedName: string;
+  try {
+    scopedName = decodeURIComponent(rawName);
+  } catch {
+    scopedName = rawName;
+  }
   const now = useNow();
   const city = getActiveCity();
   const [selectedOutput, setSelectedOutput] = useState<{
