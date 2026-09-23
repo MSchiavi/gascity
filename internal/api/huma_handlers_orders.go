@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -71,6 +72,22 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 	aa := s.state.Orders()
 
 	ep := s.state.EventProvider()
+	stores := make([][]workflowStoreInfo, len(aa))
+	for i, a := range aa {
+		if a.Rig != "" && s.state.BeadStore(a.Rig) == nil {
+			return nil, apierr.ServiceUnavailable.Msg("order rig store unavailable for " + a.ScopedName())
+		}
+		infos, err := orderStoreInfosForState(s.state, a)
+		if err != nil {
+			return nil, apierr.ServiceUnavailable.Msg("order stores unavailable for " + a.ScopedName())
+		}
+		for _, info := range infos {
+			if err := cacheLiveOr503(info.store); err != nil {
+				return nil, err
+			}
+		}
+		stores[i] = infos
+	}
 
 	index := s.latestIndex()
 	cacheKey := cacheKeyFor("orders-check", input)
@@ -83,12 +100,12 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 
 	now := time.Now()
 	checks := make([]orderCheckResponse, 0, len(aa))
-	for _, a := range aa {
-		storeInfos, err := orderStoreInfosForState(s.state, a)
+	for i, a := range aa {
+		storeInfos := stores[i]
+		history, err := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
 		if err != nil {
-			storeInfos = nil
+			return nil, apierr.StoreUnavailable.Msg(fmt.Sprintf("reading order history for %q: %v", a.ScopedName(), err))
 		}
-		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
 		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
@@ -227,7 +244,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 
-	results, err := orderHistoryBeadsAcrossStoreInfos(storeInfos, scopedName, limit, beforeTime)
+	results, err := orderHistoryBeadsAcrossStoreInfos(storeInfos, scopedName, limit, beforeTime, false)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -447,7 +464,7 @@ func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {
 	if fresh {
-		return orderHistoryBeadsAcrossStoreInfos(infos, scopedName, limit, beforeTime)
+		return orderHistoryBeadsAcrossStoreInfos(infos, scopedName, limit, beforeTime, true)
 	}
 	return orderHistoryBeadsAcrossStoreInfosCachedFirst(infos, scopedName, limit, beforeTime)
 }
@@ -460,7 +477,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 	label := "order-run:" + scopedName
 	seen := make(map[string]bool)
 	results := make([]orderHistoryStoreBead, 0)
-	for i, info := range infos {
+	for _, info := range infos {
 		if info.store == nil {
 			continue
 		}
@@ -486,13 +503,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows, err = info.store.List(query)
 		}
 		if err != nil {
-			if i == 0 && len(rows) == 0 {
-				return nil, err
-			}
-			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			if len(rows) == 0 {
-				continue
-			}
+			return nil, fmt.Errorf("list %s: %w", info.ref, err)
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -516,7 +527,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 	return results, nil
 }
 
-func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time) ([]orderHistoryStoreBead, error) {
+func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, requireComplete bool) ([]orderHistoryStoreBead, error) {
 	if len(infos) == 0 {
 		return nil, errNoOrderStores
 	}
@@ -537,8 +548,8 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			if i == 0 && len(rows) == 0 {
-				return nil, err
+			if requireComplete || i == 0 && len(rows) == 0 {
+				return nil, fmt.Errorf("list %s: %w", info.ref, err)
 			}
 			log.Printf("api: order history list failed for %s: %v", info.ref, err)
 			if len(rows) == 0 {

@@ -44,6 +44,8 @@ export function OrdersPage() {
 
   const checksAvailable =
     checksSource.data !== undefined && !checksSource.loading && checksSource.error === null;
+  const ordersAvailable =
+    ordersSource.data !== undefined && !ordersSource.loading && ordersSource.error === null;
 
   const rows = useMemo<OrderRow[]>(() => {
     const checks = new Map(
@@ -55,7 +57,10 @@ export function OrdersPage() {
     }));
   }, [ordersSource.data, checksSource.data, checksAvailable]);
 
-  const dueCount = checksAvailable ? rows.filter((row) => row.check?.due === true).length : null;
+  const dueCount =
+    ordersAvailable && checksAvailable
+      ? (checksSource.data?.filter((check) => check.due).length ?? null)
+      : null;
   const loading = ordersSource.loading || checksSource.loading;
   const error =
     [ordersSource.error, checksSource.error]
@@ -63,9 +68,9 @@ export function OrdersPage() {
       .join('; ') || null;
 
   const synopsis =
-    ordersSource.data === undefined
+    ordersSource.data === undefined && ordersSource.loading
       ? 'Loading orders.'
-      : `${rows.length} ${rows.length === 1 ? 'order' : 'orders'} registered. ${dueCount === null ? 'Due count unavailable.' : `${dueCount} due now.`}`;
+      : `${ordersAvailable ? `${rows.length} ${rows.length === 1 ? 'order' : 'orders'} registered.` : 'Order count unavailable.'} ${dueCount === null ? 'Due count unavailable.' : `${dueCount} due now.`}`;
 
   return (
     <section>
@@ -91,8 +96,10 @@ export function OrdersPage() {
         }
       />
 
-      {ordersSource.data === undefined && error === null ? (
-        <p className="text-body text-fg-muted italic">Loading orders.</p>
+      {ordersSource.data === undefined ? (
+        <p className="text-body text-fg-muted italic">
+          {ordersSource.loading ? 'Loading orders.' : 'Order list unavailable.'}
+        </p>
       ) : (
         <Table
           columns={orderColumns(now)}

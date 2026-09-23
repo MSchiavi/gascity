@@ -200,4 +200,33 @@ describe('OrdersPage', () => {
     expect(screen.queryByText(/1 due now/)).toBeNull();
     expect(screen.queryByText(/^due now$/)).toBeNull();
   });
+
+  it('counts every due check even when the order list omits a newly registered order', async () => {
+    mockOrders = [order()];
+    mockChecks = [
+      check(),
+      check({ name: 'new-sweep', scoped_name: 'new-sweep', due: true, reason: 'due' }),
+    ];
+    renderPage();
+
+    expect(await screen.findByText(/1 due now/)).toBeDefined();
+  });
+
+  it('withholds counts when the orders refresh fails but checks refresh succeeds', async () => {
+    mockOrders = [order()];
+    mockChecks = [check()];
+    renderPage();
+    expect(await screen.findByText(/0 due now/)).toBeDefined();
+
+    ordersMode = 'fail';
+    mockChecks = [check({ name: 'new-sweep', scoped_name: 'new-sweep', due: true })];
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+
+    expect(await screen.findByRole('alert')).toBeDefined();
+    expect(screen.getByText(/due count unavailable/i)).toBeDefined();
+    expect(screen.queryByText(/0 due now/)).toBeNull();
+    expect(screen.queryByText(/1 due now/)).toBeNull();
+  });
 });

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1043,7 +1044,7 @@ func TestHandleOrderCheckFallsBackToLiveHistoryWhenCacheUnavailable(t *testing.T
 	}
 }
 
-func TestHandleOrderCheckSkipsUnavailableRigStore(t *testing.T) {
+func TestHandleOrderCheckRejectsUnavailableRigStore(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
 	delete(fs.stores, "missing")
@@ -1057,18 +1058,61 @@ func TestHandleOrderCheckSkipsUnavailableRigStore(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
+}
 
+func TestHandleOrderCheckRejectsPartialHistoryReads(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		for _, failedStore := range []string{"rig", "city", "orders"} {
+			t.Run(fmt.Sprintf("fresh=%t/%s", fresh, failedStore), func(t *testing.T) {
+				fs := newFakeState(t)
+				fs.cityBeadStore = beads.NewMemStore()
+				fs.ordersBeadStore = beads.NewMemStore()
+				fs.autos = []orders.Order{{Name: "nightly-review", Rig: "myrig", Trigger: "cooldown", Interval: "24h"}}
+				switch failedStore {
+				case "rig":
+					fs.stores["myrig"] = failListStore{Store: fs.stores["myrig"]}
+				case "city":
+					fs.cityBeadStore = failListStore{Store: fs.cityBeadStore}
+				case "orders":
+					fs.ordersBeadStore = failListStore{Store: fs.ordersBeadStore}
+				}
+				path := "/orders/check"
+				if fresh {
+					path += "?fresh=true"
+				}
+				w := httptest.NewRecorder()
+				newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, path), nil))
+				if w.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+				}
+				if strings.Contains(w.Body.String(), "\"checks\"") {
+					t.Fatalf("partial checks returned after %s store failure: %s", failedStore, w.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestHandleOrderCheckEmptyHistoryIsComplete(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{{Name: "nightly-review", Trigger: "cooldown", Interval: "24h"}}
+	w := httptest.NewRecorder()
+	newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
 	var resp struct {
 		Checks []orderCheckResponse `json:"checks"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatal(err)
 	}
-	if len(resp.Checks) != 2 {
-		t.Fatalf("len(checks) = %d, want 2", len(resp.Checks))
+	if len(resp.Checks) != 1 || !resp.Checks[0].Due || resp.Checks[0].LastRun != nil {
+		t.Fatalf("empty history check = %+v, want due with no last run", resp.Checks)
 	}
 }
 

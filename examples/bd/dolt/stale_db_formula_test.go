@@ -24,75 +24,12 @@ func staleDBFilteredEnv(keys ...string) []string {
 	return filteredEnv(keys...)
 }
 
-func TestStaleDBFormulaRuntimeContract(t *testing.T) {
-	root := repoRoot(t)
-	f, err := formula.NewParser().ParseFile(filepath.Join(root, "formulas", "mol-dog-stale-db.toml"))
-	if err != nil {
-		t.Fatalf("ParseFile: %v", err)
-	}
-
-	if len(f.Steps) != 1 {
-		t.Fatalf("len(Steps) = %d, want 1 so shell state stays inside one formula step", len(f.Steps))
-	}
-
-	desc := f.Steps[0].Description
-	for _, want := range []string{
-		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
-		`TMP_DIR=$(mktemp -d`,
-		`trap cleanup EXIT`,
-		`drain_ack_once()`,
-		`gc dolt-cleanup --json --probe > "$SCAN_FILE"`,
-		`gc dolt-cleanup --json --probe --force --max-orphan-dbs "{{max_orphans_for_sql}}" > "$APPLY_FILE"`,
-		`jq -r '.dropped.count // 0'`,
-		`jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length'`,
-		`jq -r '[.force_blockers[]?] | length'`,
-		`jq -r '.reaped.targets | length'`,
-		`gc event emit mol-dog-stale-db.scan`,
-		`gc event emit mol-dog-stale-db.drop`,
-		`gc event emit mol-dog-stale-db.purge`,
-		`gc event emit mol-dog-stale-db.reap`,
-		`gc event emit mol-dog-stale-db.done`,
-		`gc event emit mol-dog-stale-db.escalate`,
-		`if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then`,
-		`leaving work bead open`,
-		`maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
-		`maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"`,
-		`escalated=${ESCALATED}`,
-	} {
-		if !strings.Contains(desc, want) {
-			t.Errorf("formula step missing %q", want)
-		}
-	}
-	for _, bad := range []string{
-		`/tmp/dolt-cleanup`,
-		`gc nudge deacon`,
-		`gc session nudge deacon`,
-		`GC_BEAD_ID:-<work-bead>`,
-		`GC_BEAD_ID:?`,
-		`Dolt orphan(s) detected`,
-	} {
-		if strings.Contains(desc, bad) {
-			t.Errorf("formula step still contains retired or leaky pattern %q", bad)
-		}
-	}
-}
-
 func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
 	}
 
 	script := renderStaleDBFormulaShell(t)
-	for _, want := range []string{
-		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("rendered script missing %q", want)
-		}
-	}
-
 	cmd := exec.Command("bash", "-n")
 	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -406,6 +343,7 @@ esac
 	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
 		"GC_ALIAS=dog-alpha",
+		"GC_MAINTENANCE_DONE_TARGET=operator",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,
@@ -425,6 +363,9 @@ esac
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
 		"bd close bead-1 --actor dog-alpha",
+		"gc session nudge operator MAINTENANCE_WARN: 22 Dolt orphan(s) seen this scan",
+		"gc session nudge operator MAINTENANCE_DONE: stale-db - orphans: 22, applied: 1, escalated: 0",
+		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)

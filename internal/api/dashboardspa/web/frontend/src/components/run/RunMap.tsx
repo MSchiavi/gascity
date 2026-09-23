@@ -46,7 +46,13 @@ const ACTIVE_LIST_ID = 'runs-active-list';
 // preview keeps the section ambient by default per DESIGN.md.
 const HISTORICAL_PREVIEW = 5;
 
-export function RunMap({ source, now, showHistory, canonicalCounts, attentionSeverity }: RunMapProps) {
+export function RunMap({
+  source,
+  now,
+  showHistory,
+  canonicalCounts,
+  attentionSeverity,
+}: RunMapProps) {
   if (source.status === 'error') {
     return (
       <section>
@@ -114,6 +120,11 @@ function ActiveSection({
         </p>
       );
     }
+    if (summary.blockedLanes.length > 0) {
+      return (
+        <p className="mt-8 text-body text-fg-muted italic">No active lane details available.</p>
+      );
+    }
     const openRuns = canonicalOpenRunCount(canonicalCounts);
     if (openRuns !== undefined && openRuns > 0) {
       return (
@@ -123,7 +134,9 @@ function ActiveSection({
       );
     }
     if (openRuns === undefined) {
-      return <p className="mt-8 text-body text-fg-muted italic">No run lane details available.</p>;
+      return (
+        <p className="mt-8 text-body text-fg-muted italic">No active lane details available.</p>
+      );
     }
     // Distinguish "nothing at all" from "nothing active but N completed".
     const trailer = summary.totalHistorical > 0 ? ` (${summary.totalHistorical} completed.)` : '';
@@ -351,7 +364,9 @@ function CountsHeader({
         {COUNT_LABELS.map(([key, label]) => (
           <CountTile key={key} label={label} value={summary?.runCounts[key] ?? '—'} tone="muted" />
         ))}
-        {blocked > 0 && <CountTile label="Blocked lanes (non-stale)" value={blocked} tone="muted" />}
+        {blocked > 0 && (
+          <CountTile label="Blocked lanes (non-stale)" value={blocked} tone="muted" />
+        )}
       </div>
     </header>
   );
