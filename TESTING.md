@@ -1006,10 +1006,9 @@ bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
 naming current slot holders the moment it starts waiting. Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
-bead-ownership staleness. That 75 is only visible to callers that invoke
-`scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
-which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
+bead-ownership staleness. That 75 is directly visible from either script;
+Makefile targets and `.githooks/pre-push` (`exec make test-fast-parallel`)
+run them under `make`, which reports a target error and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
 holding process exits — success, failure, or crash alike — so a stale slot
@@ -1025,9 +1024,10 @@ PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
 contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
 invocation.
 
-The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
-directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
-itself (`fast` and `full` modes) rather than through a `go test` trampoline.
+The slot mechanics are covered by `scripts/test-push-gate-lock.sh` and
+`scripts/test-with-push-gate-slot.sh`, run directly as the
+`push-gate-lock-selftest` job inside `test-local-parallel` (`fast` and `full`
+modes) rather than through a `go test` trampoline.
 A trampoline's `exec.Command` call would itself add a tracked subprocess
 occurrence to `internal/testpolicy/resourcecensus`'s baselines — including
 the `scope=all` audit row, which fails on any change, growth or shrinkage

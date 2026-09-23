@@ -88,7 +88,9 @@ func ExtractMuseTailUsage(path string) ([]TailUsage, error) {
 }
 
 // ExtractMuseTailUsageSince reads the transcript to its start or the 16 MiB cap.
-// Callers still filter entries at or before cursorID and deduplicate facts.
+// A replay of cursorID may follow newer calls, so scanning must not stop at
+// the cursor. The extractor keeps each ID's first physical position, then the
+// caller filters by cursor identity.
 func ExtractMuseTailUsageSince(path, cursorID string) ([]TailUsage, error) {
 	return extractMuseTailUsageSince(path, cursorID, maxUsageScanBytes)
 }
@@ -130,7 +132,7 @@ func ExtractMuseTailUsageFromSearchPaths(searchPaths []string, path string) ([]T
 }
 
 // ExtractMuseTailUsageSinceFromSearchPaths validates the transcript against
-// Muse's merged session roots before scanning from the usage cursor.
+// Muse's merged session roots before the bounded usage scan.
 func ExtractMuseTailUsageSinceFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
 	safePath, err := validateSearchPathFile(mergeMuseSearchPaths(searchPaths), path)
 	if err != nil {

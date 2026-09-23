@@ -41,10 +41,13 @@ instead of opening a (dead) URL.
 
 ## What it shows
 
-The dashboard reads the supervisor's typed API directly (same origin), so it
-reflects live state: agents and their sessions, beads, mail, formula runs, and a
-health view (system, local tools, per-rig store health, and the dolt store
-trend).
+The dashboard reads the supervisor's typed API directly (same origin). It
+shows agents and their sessions, beads, mail, formula runs,
+orders and their recent history, activity, usage, and a health view (system,
+local tools, per-rig store health, and the dolt store trend). See the
+[Orders tutorial](/tutorials/07-orders#order-history) for run output details.
+Usage totals remain visible when a reading is partial or stale. Derived run
+rates are withheld for those readings and whenever timing is unproven.
 
 ## Security posture
 

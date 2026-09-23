@@ -74,8 +74,7 @@ export function Header() {
   // True once the list has loaded and the selected city is a member. While the
   // list is empty (pre-load or a transient fetch blip) we do NOT flag the city
   // as unknown — only a loaded list that omits it is a real miss.
-  const activeCityKnown =
-    selectedCity === '' || cityItems.some((c) => c.name === selectedCity);
+  const activeCityKnown = selectedCity === '' || cityItems.some((c) => c.name === selectedCity);
   // Show the switcher whenever there's a choice to make, or when the selected
   // city is unknown — in the latter case the disabled "(unknown)" option keeps
   // the stale city visible instead of an empty select.

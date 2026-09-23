@@ -574,9 +574,7 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
           client,
           path: { cityName },
           ...(query ? { query } : {}),
-        }) as Promise<
-          SupervisorResult<OrderListBody>
-        >,
+        }) as Promise<SupervisorResult<OrderListBody>>,
         'gc supervisor orders response was empty',
       );
     },

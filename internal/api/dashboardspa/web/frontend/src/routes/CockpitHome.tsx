@@ -126,8 +126,9 @@ export function CockpitHomePage() {
   // activity: the live window when it does, else the rolling 24h average. With
   // neither, the dials read unavailable — a structural zero would render as a
   // real "0 / min", which it is not.
+  const derivedRatesAvailable = !usageReading.stale && usage?.partial !== true;
   const rateWindow: { totals: UsageTotals; seconds: number; basis?: string } | null =
-    !usageAvailable
+    !usageAvailable || !derivedRatesAvailable
       ? null
       : usage.recent.invocations > 0
         ? { totals: usage.recent, seconds: usage.recent_window_secs }
@@ -141,9 +142,8 @@ export function CockpitHomePage() {
   // has no runs, and the rate table otherwise.
   const runRows = usageAvailable ? (usage.today_by_run ?? null) : null;
   const runAggregate = runRows === null ? null : aggregateRunRates(runRows);
-  const aggregateRatesAvailable = !usageReading.stale && usage?.partial !== true;
   const visibleRunAggregate =
-    runAggregate === null || aggregateRatesAvailable
+    runAggregate === null || derivedRatesAvailable
       ? runAggregate
       : { ...runAggregate, tokensPerMinute: null, dollarsPerMinute: null };
   const activeSessionsFromStatus = status?.session_counts_detail?.active;
@@ -431,7 +431,7 @@ export function CockpitHomePage() {
         ) : (
           <>
             <Table
-              columns={runRateColumns(aggregateRatesAvailable)}
+              columns={runRateColumns(derivedRatesAvailable)}
               rows={runRows}
               rowKey={(row) => row.run}
               empty="no runs recorded today"

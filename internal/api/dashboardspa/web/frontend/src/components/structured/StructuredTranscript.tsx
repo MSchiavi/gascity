@@ -84,7 +84,13 @@ function ToolBlock({
 /** History envelope block (rendered before the messages). Spec §4. */
 export function StructuredHistory({ history }: { history: SessionStructuredHistory }) {
   const rows = historyRows(history);
-  return <ToolBlock kind="history" label="structured session" body={rows.join('\n') || 'structured history'} />;
+  return (
+    <ToolBlock
+      kind="history"
+      label="structured session"
+      body={rows.join('\n') || 'structured history'}
+    />
+  );
 }
 
 /** User-prompt metadata block. Renders nothing when there are no rows. Spec §2. */
@@ -109,7 +115,11 @@ export function ToolUseBlock({
 }) {
   const rows = block.input !== undefined ? toolInputRows(block.input) : [];
   return (
-    <ToolBlock kind="tool" label={block.name !== undefined && block.name !== '' ? block.name : 'tool'} body={rows.join('\n')} />
+    <ToolBlock
+      kind="tool"
+      label={block.name !== undefined && block.name !== '' ? block.name : 'tool'}
+      body={rows.join('\n')}
+    />
   );
 }
 
@@ -172,7 +182,11 @@ export function InteractionBlock({
 }: {
   block: Extract<SessionStructuredBlock, { type: 'interaction' }>;
 }) {
-  return <pre className="text-body whitespace-pre-wrap leading-relaxed overflow-x-auto">{formatInteraction(block)}</pre>;
+  return (
+    <pre className="text-body whitespace-pre-wrap leading-relaxed overflow-x-auto">
+      {formatInteraction(block)}
+    </pre>
+  );
 }
 
 /** A streamed pending-interaction frame, rendered as its own message-shaped block. Spec §9. */
@@ -198,7 +212,9 @@ export function StructuredBlock({ block }: { block: SessionStructuredBlock }) {
     case 'thinking':
       return (
         <pre className="text-body whitespace-pre-wrap leading-relaxed overflow-x-auto text-fg-muted italic">
-          {block.thinking !== undefined && block.thinking !== '' ? `[thinking] ${block.thinking}` : '[thinking]'}
+          {block.thinking !== undefined && block.thinking !== ''
+            ? `[thinking] ${block.thinking}`
+            : '[thinking]'}
         </pre>
       );
     case 'tool_use':
@@ -250,7 +266,9 @@ export function StructuredMessage({ message }: { message: SessionStructuredMessa
     <li className="space-y-2">
       <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 pb-2 border-b border-rule">
         <RoleLabel role={role} />
-        {message.provider !== undefined && message.provider !== '' && <HeaderMeta>{message.provider}</HeaderMeta>}
+        {message.provider !== undefined && message.provider !== '' && (
+          <HeaderMeta>{message.provider}</HeaderMeta>
+        )}
         <span className="text-body text-fg tnum" title={message.timestamp ?? undefined}>
           {formatClockTime(message.timestamp)}
         </span>
@@ -258,7 +276,7 @@ export function StructuredMessage({ message }: { message: SessionStructuredMessa
           <HeaderMeta>{assistantMetadata.model}</HeaderMeta>
         )}
         {usage !== '' && <HeaderMeta>{usage}</HeaderMeta>}
-		<HeaderMeta>{message.status}</HeaderMeta>
+        <HeaderMeta>{message.status}</HeaderMeta>
         {assistantMetadata?.stop_reason !== undefined && assistantMetadata.stop_reason !== '' && (
           <HeaderMeta>{assistantMetadata.stop_reason}</HeaderMeta>
         )}

@@ -77,7 +77,15 @@ export function ActivityPage() {
     eventCursor ?? 'newest',
   ].join(':');
   const { data, loading, error, refresh } = useCachedData(cacheKey, () =>
-    fetchActivityBundle(mode, eventType, eventActor, eventWindow, eventSignal, textFilter, eventCursor),
+    fetchActivityBundle(
+      mode,
+      eventType,
+      eventActor,
+      eventWindow,
+      eventSignal,
+      textFilter,
+      eventCursor,
+    ),
   );
 
   const showOlderEvents = () => {
@@ -415,7 +423,8 @@ function EventsSection({
       )}
       {pageScopedFilters && (
         <p className="text-label text-fg-muted">
-          Search and signal filters apply to this page. Use Older events to inspect more of the selected window.
+          Search and signal filters apply to this page. Use Older events to inspect more of the
+          selected window.
         </p>
       )}
       <ActivityTable label="Supervisor events">

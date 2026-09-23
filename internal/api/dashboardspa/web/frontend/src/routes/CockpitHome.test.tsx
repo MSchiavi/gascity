@@ -489,6 +489,8 @@ describe('<CockpitHomePage>', () => {
         .slice(1, 3)
         .map((cell) => cell.textContent),
     ).toEqual(['—', '—']);
+    expect(screen.getByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
     partial.unmount();
 
     mocks.cityUsage.mockResolvedValue({ ...usage, partial: false, today_by_run: [measured] });
@@ -498,6 +500,8 @@ describe('<CockpitHomePage>', () => {
         'aggregate · returned 1 run · full-day scope unknown · 60/min · $0.01/min',
       ),
     ).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'tokens / min: 120' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: $6.00' })).toBeTruthy();
     fresh.unmount();
 
     mocks.cityUsage.mockRejectedValue(new Error('usage refresh failed'));
@@ -512,6 +516,8 @@ describe('<CockpitHomePage>', () => {
         .slice(1, 3)
         .map((cell) => cell.textContent),
     ).toEqual(['—', '—']);
+    expect(screen.getByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
     expect(screen.getAllByText('usage is stale · refresh failed').length).toBeGreaterThan(0);
   });
 
