@@ -363,7 +363,7 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
 
 Each database was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostic from the final attempt:$FAILED_DETAILS
 
-A database listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per database under $BACKUP_ARTIFACT_DIR rather than trusting this message alone." \
+A database listed here received no new backup from this run. Prior backup availability and freshness are unknown; inspect each database under $BACKUP_ARTIFACT_DIR." \
         2>/dev/null || true
 fi
 
@@ -372,19 +372,25 @@ fi
 # otherwise only when they need it. This was previously labelled "non-fatal"
 # and reported nowhere but the summary line — an installation lost three days
 # of offsite coverage on part of its city before a human noticed by accident.
-# Non-fatal it is (the local backup did succeed, so the run does not fail);
-# silent it must not be.
 case "$OFFSITE_STATUS" in
     ok|skipped) ;;
     *)
+        if [ "$FAILED_COUNT" -eq 0 ]; then
+            LOCAL_COVERAGE="Local backup sync succeeded for all configured databases ($SYNCED/$TOTAL)."
+        elif [ "$SYNCED" -eq 0 ]; then
+            LOCAL_COVERAGE="Local backup sync failed for all configured databases (0/$TOTAL). This run produced no successful database backup."
+        else
+            LOCAL_COVERAGE="Local backup sync was partial: $SYNCED/$TOTAL databases synced; failed databases: $FAILED_DBS. Only successfully synced databases have new local backup data from this run."
+        fi
         dolt_escalate \
             "Dolt backup: offsite publication $OFFSITE_STATUS [MEDIUM]" \
-            "Local backup succeeded ($SYNCED/$TOTAL databases) but publication to $OFFSITE_PATH did not.
+            "$LOCAL_COVERAGE
+Publication to $OFFSITE_PATH did not complete.
 Status: $OFFSITE_STATUS. Bound: ${OFFSITE_TIMEOUT}s (raise with GC_BACKUP_OFFSITE_TIMEOUT).
 Raising it past the run's remaining budget also needs timeout raised in
 examples/bd/dolt/orders/mol-dog-backup.toml, or the controller kills this run
 mid-rsync and this escalation never fires.
-Until this clears, the only copy of these databases is on this host." \
+Check local and offsite backup freshness per database; this run does not establish whether older offsite copies exist." \
             2>/dev/null || true
         ;;
 esac

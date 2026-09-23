@@ -5562,11 +5562,126 @@ exec "$@"
 	for _, want := range []string{
 		"mail send human -s Dolt backup: offsite publication failed [MEDIUM]",
 		"Status: failed. Bound: 17s (raise with GC_BACKUP_OFFSITE_TIMEOUT).",
-		"Until this clears, the only copy of these databases is on this host.",
+		"Local backup sync succeeded for all configured databases (1/1).",
+		"this run does not establish whether older offsite copies exist.",
 	} {
 		if !strings.Contains(string(gcLog), want) {
 			t.Fatalf("offsite failure escalation missing %q:\n%s", want, gcLog)
 		}
+	}
+}
+
+func TestBackupScriptReportsLocalCoverageSeparatelyFromOffsiteStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		databases       []string
+		failedDB        string
+		rsyncExit       int
+		wantFailure     bool
+		wantSummary     string
+		wantCoverage    string
+		wantOffsiteMail bool
+	}{
+		{
+			name:            "partial local and offsite failure",
+			databases:       []string{"prod", "archive"},
+			failedDB:        "archive",
+			rsyncExit:       1,
+			wantFailure:     true,
+			wantSummary:     "synced: 1/2, offsite: failed",
+			wantCoverage:    "Local backup sync was partial: 1/2 databases synced; failed databases: archive(sync failed).",
+			wantOffsiteMail: true,
+		},
+		{
+			name:            "all local and offsite failure",
+			databases:       []string{"prod"},
+			failedDB:        "prod",
+			rsyncExit:       1,
+			wantFailure:     true,
+			wantSummary:     "synced: 0/1, offsite: failed",
+			wantCoverage:    "Local backup sync failed for all configured databases (0/1).",
+			wantOffsiteMail: true,
+		},
+		{
+			name:            "local success and offsite failure",
+			databases:       []string{"prod"},
+			rsyncExit:       1,
+			wantSummary:     "synced: 1/1, offsite: failed",
+			wantCoverage:    "Local backup sync succeeded for all configured databases (1/1).",
+			wantOffsiteMail: true,
+		},
+		{
+			name:        "local and offsite success",
+			databases:   []string{"prod"},
+			wantSummary: "synced: 1/1, offsite: ok",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, binDir := t.TempDir(), t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			artifactDir := filepath.Join(cityPath, ".dolt-backup")
+			offsiteDir := filepath.Join(cityPath, "offsite")
+			for _, dir := range []string{artifactDir, offsiteDir} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, db := range tc.databases {
+				if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gcLogPath := writeDogFakeGC(t, binDir)
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = version ]; then
+  printf 'dolt version 2.1.0\n'
+  exit 0
+fi
+if [ "${1:-}" = backup ] && [ "$#" -eq 1 ]; then
+  db="${PWD##*/}"
+  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  [ "${PWD##*/}" = %s ] && exit 1
+  exit 0
+fi
+exit 64
+`, shellQuote(tc.failedDB)))
+			writeBackupFakeRsync(t, binDir, tc.rsyncExit)
+
+			out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+				"GC_BACKUP_DATABASES="+strings.Join(tc.databases, ","),
+				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
+				"GC_DOLT_BACKUP_SYNC_ATTEMPTS=1",
+			)
+			if (runErr != nil) != tc.wantFailure || !strings.Contains(out, tc.wantSummary) {
+				t.Fatalf("backup result: err=%v, output=%q; want failure=%t and summary %q", runErr, out, tc.wantFailure, tc.wantSummary)
+			}
+			gcLog, err := os.ReadFile(gcLogPath)
+			if err != nil && !(os.IsNotExist(err) && !tc.wantOffsiteMail && !tc.wantFailure) {
+				t.Fatal(err)
+			}
+			mail := string(gcLog)
+			if tc.wantFailure && !strings.Contains(mail, "Prior backup availability and freshness are unknown") {
+				t.Fatalf("local failure alert claims unsupported recovery state:\n%s", mail)
+			}
+			alert := "mail send human -s Dolt backup: offsite publication failed [MEDIUM]"
+			if strings.Contains(mail, alert) != tc.wantOffsiteMail {
+				t.Fatalf("offsite alert presence = %t, want %t:\n%s", strings.Contains(mail, alert), tc.wantOffsiteMail, mail)
+			}
+			if tc.wantOffsiteMail {
+				if !strings.Contains(mail, tc.wantCoverage) || !strings.Contains(mail, "older offsite copies exist") {
+					t.Fatalf("offsite alert omits coverage or copy uncertainty:\n%s", mail)
+				}
+				for _, bad := range []string{"Local backup succeeded (", "the only copy of these databases is on this host"} {
+					if strings.Contains(mail, bad) {
+						t.Fatalf("offsite alert claims unsupported coverage %q:\n%s", bad, mail)
+					}
+				}
+			}
+		})
 	}
 }
 
