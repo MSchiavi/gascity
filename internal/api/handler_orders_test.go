@@ -1169,6 +1169,53 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 }
 
+type partialOrderHistoryStore struct {
+	beads.Store
+	rows []beads.Bead
+}
+
+func (s partialOrderHistoryStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.rows, fmt.Errorf("history read failed")
+}
+
+func TestHandleOrderHistoryRejectsPartialStoreReads(t *testing.T) {
+	for _, failedStore := range []string{"rig", "city", "orders", "rows-plus-error"} {
+		t.Run(failedStore, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cityBeadStore = beads.NewMemStore()
+			fs.ordersBeadStore = beads.NewMemStore()
+			fs.autos = []orders.Order{{Name: "nightly-review", Rig: "myrig", Formula: "mol-review"}}
+			if _, err := fs.stores["myrig"].Create(beads.Bead{
+				Title:  "nightly-review tracking",
+				Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			switch failedStore {
+			case "rig":
+				fs.stores["myrig"] = failListStore{Store: fs.stores["myrig"]}
+			case "city":
+				fs.cityBeadStore = failListStore{Store: fs.cityBeadStore}
+			case "orders":
+				fs.ordersBeadStore = failListStore{Store: fs.ordersBeadStore}
+			case "rows-plus-error":
+				fs.ordersBeadStore = partialOrderHistoryStore{
+					Store: fs.ordersBeadStore,
+					rows:  []beads.Bead{{ID: "partial-run", Labels: []string{"order-run:nightly-review:rig:myrig"}, CreatedAt: time.Now()}},
+				}
+			}
+			w := httptest.NewRecorder()
+			newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "store-unavailable") || strings.Contains(w.Body.String(), "\"entries\"") {
+				t.Fatalf("partial %s read returned complete-looking history: %s", failedStore, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleOrderHistoryProjectsStoredOutcomesWithoutOutput(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()

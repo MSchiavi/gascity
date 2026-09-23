@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidate } from '../api/cache';
 import { setActiveCity } from '../api/cityBase';
@@ -15,22 +15,46 @@ import { OrderDetailPage } from './OrderDetail';
 
 let mockOrder: SupervisorOrder | null = null;
 let mockHistory: SupervisorOrderHistoryEntry[] = [];
-let orderMode: 'ok' | 'fail' = 'ok';
+let mockOrdersByName: Record<string, SupervisorOrder> = {};
+let mockHistoryByName: Record<string, SupervisorOrderHistoryEntry[]> = {};
+let orderMode: 'ok' | 'fail' | 'pending' = 'ok';
+let historyMode: 'ok' | 'fail' | 'pending' = 'ok';
+let outputMode: 'ok' | 'pending' = 'ok';
+let releaseOrder: (() => void) | null = null;
+let releaseHistory: (() => void) | null = null;
+let releaseOutput: (() => void) | null = null;
 let mockOutput = 'backup completed';
 
 vi.mock('../supervisor/orderReads', () => ({
-  getSupervisorOrder: vi.fn(async () => {
+  getSupervisorOrder: vi.fn(async (name: string) => {
+    if (orderMode === 'pending')
+      await new Promise<void>((resolve) => {
+        releaseOrder = resolve;
+      });
     if (orderMode === 'fail' || mockOrder === null) throw new Error('order unavailable');
-    return mockOrder;
+    return mockOrdersByName[name] ?? mockOrder;
   }),
-  listSupervisorOrderHistory: vi.fn(async () => mockHistory),
-  getSupervisorOrderHistoryDetail: vi.fn(async (beadId: string, storeRef: string) => ({
-    bead_id: beadId,
-    created_at: '2026-09-23T00:00:00Z',
-    labels: null,
-    output: mockOutput,
-    store_ref: storeRef,
-  })),
+  listSupervisorOrderHistory: vi.fn(async (name: string) => {
+    if (historyMode === 'pending')
+      await new Promise<void>((resolve) => {
+        releaseHistory = resolve;
+      });
+    if (historyMode === 'fail') throw new Error('history unavailable');
+    return mockHistoryByName[name] ?? mockHistory;
+  }),
+  getSupervisorOrderHistoryDetail: vi.fn(async (beadId: string, storeRef: string) => {
+    if (outputMode === 'pending')
+      await new Promise<void>((resolve) => {
+        releaseOutput = resolve;
+      });
+    return {
+      bead_id: beadId,
+      created_at: '2026-09-23T00:00:00Z',
+      labels: null,
+      output: mockOutput,
+      store_ref: storeRef,
+    };
+  }),
 }));
 
 function order(overrides: Partial<SupervisorOrder> = {}): SupervisorOrder {
@@ -81,6 +105,32 @@ function detailRoute(name = 'triage-sweep') {
   );
 }
 
+function RouteControls() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button onClick={() => navigate('/orders/triage-sweep')}>Order A</button>
+      <button onClick={() => navigate('/orders/order-b')}>Order B</button>
+    </>
+  );
+}
+
+function renderWithNavigation() {
+  return render(
+    <MemoryRouter
+      initialEntries={['/orders/triage-sweep']}
+      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+    >
+      <NowProvider>
+        <RouteControls />
+        <Routes>
+          <Route path="/orders/:name" element={<OrderDetailPage />} />
+        </Routes>
+      </NowProvider>
+    </MemoryRouter>,
+  );
+}
+
 function renderDetail(name = 'triage-sweep') {
   return render(detailRoute(name));
 }
@@ -92,7 +142,14 @@ describe('OrderDetailPage', () => {
     setActiveCity('test-city');
     mockOrder = order();
     mockHistory = [];
+    mockOrdersByName = {};
+    mockHistoryByName = {};
     orderMode = 'ok';
+    historyMode = 'ok';
+    outputMode = 'ok';
+    releaseOrder = null;
+    releaseHistory = null;
+    releaseOutput = null;
     mockOutput = 'backup completed';
   });
 
@@ -172,6 +229,93 @@ describe('OrderDetailPage', () => {
     page.rerender(detailRoute());
 
     expect(screen.queryByText('backup completed')).toBeNull();
+  });
+
+  it('does not carry output across orders with colliding bead and store IDs', async () => {
+    mockHistoryByName = {
+      'triage-sweep': [historyEntry({ has_output: true })],
+      'order-b': [historyEntry({ name: 'order-b', scoped_name: 'order-b', has_output: true })],
+    };
+    mockOrdersByName = {
+      'order-b': order({ name: 'order-b', scoped_name: 'order-b', description: 'Second order.' }),
+    };
+    outputMode = 'pending';
+    renderWithNavigation();
+    await screen.findByText('bd-1');
+    fireEvent.click(screen.getByRole('button', { name: 'View output' }));
+    expect(await screen.findByText('Loading output.')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Order B' }));
+    expect(await screen.findByText('Second order.')).toBeDefined();
+    await act(async () => {
+      releaseOutput?.();
+    });
+    expect(screen.queryByText('backup completed')).toBeNull();
+    expect(screen.getByRole('button', { name: 'View output' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Hide output' })).toBeNull();
+
+    outputMode = 'ok';
+    mockOutput = 'second order output';
+    fireEvent.click(screen.getByRole('button', { name: 'View output' }));
+    expect(await screen.findByText('second order output')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Order A' }));
+    expect(await screen.findByText('Sweep the triage queue.')).toBeDefined();
+    expect(screen.queryByText('second order output')).toBeNull();
+    expect(screen.getByRole('button', { name: 'View output' })).toBeDefined();
+
+    outputMode = 'pending';
+    fireEvent.click(screen.getByRole('button', { name: 'View output' }));
+    expect(screen.queryByText('second order output')).toBeNull();
+    mockOutput = 'first order output';
+    await act(async () => {
+      releaseOutput?.();
+    });
+    expect(await screen.findByText('first order output')).toBeDefined();
+  });
+
+  it('waits for history independently of the order detail', async () => {
+    historyMode = 'pending';
+    renderDetail();
+    expect(await screen.findByText('Sweep the triage queue.')).toBeDefined();
+    expect(screen.getByText('Loading history.')).toBeDefined();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    await act(async () => {
+      releaseHistory?.();
+    });
+    expect(await screen.findByText('No recorded runs.')).toBeDefined();
+  });
+
+  it('does not claim empty history after an independent history failure', async () => {
+    historyMode = 'fail';
+    renderDetail();
+    expect(await screen.findByText('Sweep the triage queue.')).toBeDefined();
+    expect(await screen.findByText('History unavailable.')).toBeDefined();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('history unavailable');
+  });
+
+  it('withholds cached history after a failed refresh', async () => {
+    mockHistory = [historyEntry({ has_output: true })];
+    renderDetail();
+    expect(await screen.findByText('bd-1')).toBeDefined();
+    historyMode = 'fail';
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+    expect(await screen.findByText('History unavailable.')).toBeDefined();
+    expect(screen.queryByText('bd-1')).toBeNull();
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+  });
+
+  it('does not claim empty history while order detail is loading', async () => {
+    orderMode = 'pending';
+    renderDetail();
+    expect(screen.getAllByText('Loading order.').length).toBeGreaterThan(0);
+    expect(screen.queryByText('No recorded runs.')).toBeNull();
+    await act(async () => {
+      releaseOrder?.();
+    });
+    expect(await screen.findByText('No recorded runs.')).toBeDefined();
   });
 
   it('renders recent run history with duration and exit code', async () => {

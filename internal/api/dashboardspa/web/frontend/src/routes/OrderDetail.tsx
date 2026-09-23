@@ -32,13 +32,23 @@ export function OrderDetailPage() {
   } catch {
     scopedName = rawName;
   }
-  const now = useNow();
   const city = getActiveCity();
+  return (
+    <OrderDetailContent
+      key={JSON.stringify([city, scopedName])}
+      city={city}
+      scopedName={scopedName}
+    />
+  );
+}
+
+function OrderDetailContent({ city, scopedName }: { city: string | null; scopedName: string }) {
+  const now = useNow();
   const [selectedOutput, setSelectedOutput] = useState<{
     city: string | null;
+    scopedName: string;
     entry: SupervisorOrderHistoryEntry;
   } | null>(null);
-  const visibleOutput = selectedOutput?.city === city ? selectedOutput.entry : null;
 
   const orderSource = useCachedData(`orders:detail:${city ?? 'no-city'}:${scopedName}`, () =>
     getSupervisorOrder(scopedName),
@@ -54,6 +64,20 @@ export function OrderDetailPage() {
 
   const order = orderSource.data ?? null;
   const history = historySource.data ?? [];
+  const historyReady =
+    historySource.data !== undefined && !historySource.loading && historySource.error === null;
+  const visibleOutput =
+    historyReady &&
+    selectedOutput !== null &&
+    selectedOutput.city === city &&
+    selectedOutput.scopedName === scopedName &&
+    history.some(
+      (entry) =>
+        entry.store_ref === selectedOutput.entry.store_ref &&
+        entry.bead_id === selectedOutput.entry.bead_id,
+    )
+      ? selectedOutput.entry
+      : null;
   const loading = orderSource.loading || historySource.loading;
   const error =
     [orderSource.error, historySource.error]
@@ -115,17 +139,30 @@ export function OrderDetailPage() {
 
           <section>
             <h2 className="text-label uppercase tracking-wider text-fg-muted mb-3">Recent runs</h2>
-            <Table
-              columns={historyColumns(now, visibleOutput, (entry) =>
-                setSelectedOutput(entry === null ? null : { city, entry }),
-              )}
-              rows={history}
-              rowKey={historyRowKey}
-              empty="No recorded runs."
-            />
+            {historySource.error !== null ? (
+              <p className="text-body text-fg-muted italic">History unavailable.</p>
+            ) : historyReady ? (
+              <Table
+                columns={historyColumns(now, visibleOutput, (entry) =>
+                  setSelectedOutput(entry === null ? null : { city, scopedName, entry }),
+                )}
+                rows={history}
+                rowKey={historyRowKey}
+                empty="No recorded runs."
+              />
+            ) : (
+              <p className="text-body text-fg-muted italic">Loading history.</p>
+            )}
             {visibleOutput !== null && (
               <OrderOutputViewer
-                key={`${city ?? 'no-city'}:${historyRowKey(visibleOutput)}`}
+                key={JSON.stringify([
+                  city,
+                  scopedName,
+                  visibleOutput.store_ref,
+                  visibleOutput.bead_id,
+                ])}
+                city={city}
+                scopedName={scopedName}
                 entry={visibleOutput}
               />
             )}
@@ -212,10 +249,17 @@ function historyColumns(
   ];
 }
 
-function OrderOutputViewer({ entry }: { entry: SupervisorOrderHistoryEntry }) {
-  const city = getActiveCity();
+function OrderOutputViewer({
+  city,
+  scopedName,
+  entry,
+}: {
+  city: string | null;
+  scopedName: string;
+  entry: SupervisorOrderHistoryEntry;
+}) {
   const { data, loading, error } = useCachedData(
-    `orders:output:${city ?? 'no-city'}:${entry.store_ref}:${entry.bead_id}`,
+    `orders:output:${JSON.stringify([city, scopedName, entry.store_ref, entry.bead_id])}`,
     () => getSupervisorOrderHistoryDetail(entry.bead_id, entry.store_ref),
   );
   return (
