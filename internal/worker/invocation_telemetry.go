@@ -174,6 +174,13 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		return
 	}
 	pending := usagesAfterCursor(usages, cursor)
+	if providerFamily == "muse" {
+		// Muse's model_completed record IDs identify individual calls, and its
+		// extractor scans back to the cursor (or transcript start). On the first
+		// prompt operation, newest-only would persist a cursor past every older
+		// call, preventing the end-of-interval sweep from ever recovering them.
+		pending = usagesSinceCursor(usages, cursor)
+	}
 	if len(pending) == 0 {
 		slog.Debug("invocation telemetry: no new invocations since cursor; skipping",
 			slog.String("session_id", id), slog.String("provider", providerFamily))
@@ -446,7 +453,8 @@ func usageIdentity(u sessionlog.TailUsage) string {
 	return u.EntryUUID
 }
 
-// usagesAfterCursor returns entries strictly after the cursor identity when
+// usagesAfterCursor is the conservative prompt-operation fold for families
+// other than Muse. It returns entries strictly after the cursor identity when
 // the cursor is present in the tail window. Matching on the message identity
 // (not the entry uuid) keeps an invocation single-counted even when its
 // content-block entries straddle a prompt-operation boundary: late blocks of
@@ -468,9 +476,9 @@ func usagesAfterCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 	return usages[len(usages)-1:]
 }
 
-// usagesSinceCursor is the end-of-interval sweep's fold: it returns every window
-// entry strictly after the cursor identity. Unlike usagesAfterCursor (the
-// prompt-op seam's conservative newest-only fallback), when the cursor is empty
+// usagesSinceCursor is the sweep and Muse prompt-operation fold: it returns every
+// window entry strictly after the cursor identity. Unlike usagesAfterCursor
+// (the other prompt-op families' conservative newest-only fallback), when the cursor is empty
 // it returns ALL window entries — the sweep's whole job is to recover the
 // interval's trailing invocations that the prompt-op seam never recorded,
 // bounded only by the extractor's tail window. When the cursor is present but
@@ -563,14 +571,15 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //     Widening it needs its own correctness argument rather than this one: the
 //     codex extractor collapses on cumulative totals rather than per-message
 //     identity, so the cursor is not a usable stop condition there.
-//   - muse: still the fixed 64KB tail, and still silently lossy, for the same
-//     structural reason as codex. SessionLogAdapter.MuseTailUsage accepts the
-//     cursor and discards it; widening it to cursor-bounded growth (the run
-//     record id IS a stable per-message identity, so the stop condition
-//     exists) needs its own latency review on the synchronous lanes first.
+//   - muse: cursor-bounded growth, capped at 16MB. Unlike claude, an empty
+//     cursor also grows to the transcript start (or the cap) so a first sweep
+//     of a long autonomous interval can recover every in-window invocation.
+//     Each model_completed event has a stable run-record identity; repeated
+//     records collapse before the cursor filter sees them. The cap still
+//     permits loss for older calls in transcripts larger than 16MB.
 //
 // Neither risk the old blanket "do not widen" ceiling cited survives
-// cursor-bounded growth, which is why claude was widened. The scan is not
+// cursor-bounded growth, which is why claude and muse were widened. The scan is not
 // unbounded: it terminates at the cursor, at EOF, or at the growth cap. And it
 // cannot misattribute: with the cursor at byte P and EOF at E, a cap-hit window
 // is exactly [E-16MB, E], every byte of which is after P — so every entry

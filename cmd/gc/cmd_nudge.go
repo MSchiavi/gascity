@@ -347,7 +347,7 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&sessionName, "session", "", "runtime session name (defaults to $GC_SESSION_NAME)")
 	cmd.Flags().DurationVar(&interval, "interval", defaultNudgePollInterval, "poll interval (overrides [session] nudge_poll_interval)")
-	cmd.Flags().DurationVar(&quiescence, "quiescence", defaultNudgePollQuiescence, "minimum inactivity before injecting")
+	cmd.Flags().DurationVar(&quiescence, "quiescence", defaultNudgePollQuiescence, "fallback inactivity window when the runtime cannot report an idle prompt (0 bypasses idle checks)")
 	return cmd
 }
 
@@ -1893,6 +1893,18 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
+	}
+	// Interactive readiness is stronger evidence than pane-output timestamps:
+	// an idle TUI can repaint continuously, while a busy one can be silent.
+	// A failed snapshot must not fall back to stale activity and inject input.
+	if snapshotter, ok := sp.(runtime.IdleSnapshotProvider); ok && target.sessionName != "" {
+		idle, err := snapshotter.SnapshotIdle(target.sessionName)
+		// A routing wrapper can expose this extension even when this
+		// session's backend does not implement it. Keep that backend's
+		// activity/timed-only fallback; actual observation errors fail closed.
+		if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return err == nil && idle
+		}
 	}
 	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
 		return time.Since(*obs.LastActivity) >= quiescence

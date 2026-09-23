@@ -988,8 +988,9 @@ bounded how many heavy-suite invocations could run concurrently, producing
 false-red failures (timeouts, OOM-adjacent slowdowns) indistinguishable
 from real regressions.
 
-`scripts/test-local-parallel` — the one place all four heavy targets
-(`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
+`scripts/test-local-parallel` (for `fast`, `cmd-gc-process`, `integration`,
+`full`) and `scripts/with-push-gate-slot` (for direct `make test`, `test-mac`,
+`test-cmd-gc-process`, and their compile/product-metrics recipes) acquire
 one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
 under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
 common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
@@ -1033,10 +1034,19 @@ the `scope=all` audit row, which fails on any change, growth or shrinkage
 alike, with no per-file exemption available — so driving the script as a
 plain shell job avoids that ratchet entirely instead of bumping it.
 
-Only `scripts/test-local-parallel` is wired to this gate — the same targets
-axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
+The sharded runner divides its automatic job count by the configured slot
+count before starting work, even when only one slot is currently occupied.
+An explicit `LOCAL_TEST_JOBS` override is unchanged. Each job also sets
+`GOMAXPROCS` to its per-job budget; `-p` alone does not limit `t.Parallel`
+inside a package. The direct-suite wrapper reserves the same configured
+slot count for its default `GOMAXPROCS` and preserves an explicit caller
+value. Failed sharded jobs keep their complete logs and write every named
+Go test failure to `failure-summary.txt`, including failures beyond the
+first 240 log lines.
+
+Other direct targets (`test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
-`go test` invocations) are outside this bound too.
+`go test` invocations) remain outside this bound.
 
 This mechanism does not extend `bd` claim-lease heartbeats across the
 wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)

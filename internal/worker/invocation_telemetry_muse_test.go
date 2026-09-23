@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +86,8 @@ func TestMessageRecordsMuseInvocationTokens(t *testing.T) {
 
 	now := time.Now().Truncate(time.Second)
 	writeMuseWorkerSession(t, searchBase, now, "01a0bde4-25aa-7f50-8a21-1c2bd19389c7", workDir, []map[string]any{
-		museWorkerModelCompleted(22, "rec-1", "run-rec-1", now.Add(-time.Minute).UnixMicro(), "muse-spark-1.3-contributor", 1000, 100, 200, 0, 200, 7),
+		museWorkerModelCompleted(22, "rec-1", "run-rec-1", now.Add(-time.Minute).UnixMicro(), "muse-spark-1.3-contributor", 1000, 100, 200, 40, 200, 7),
+		{"padding": strings.Repeat("x", 70*1024)},
 		museWorkerModelCompleted(23, "rec-2", "run-rec-2", now.UnixMicro(), "muse-spark-1.3-contributor", 2000, 50, 1900, 0, 1900, 3),
 	})
 	if err := store.SetMetadata(handle.sessionID, "last_woke_at", now.UTC().Format(time.RFC3339)); err != nil {
@@ -96,12 +98,14 @@ func TestMessageRecordsMuseInvocationTokens(t *testing.T) {
 		t.Fatalf("Message: %v", err)
 	}
 
-	// No persisted cursor: only the newest invocation is recorded.
+	// No persisted cursor: Muse must record both invocations before advancing
+	// the cursor, or the first one can never be recovered by a later sweep.
 	out := collectInvocationMetrics(t, reader)
 	wantTokens := map[string]int64{
-		"gc.agent.tokens.input":      2000 - 1900,
-		"gc.agent.tokens.output":     50,
-		"gc.agent.tokens.cache_read": 1900,
+		"gc.agent.tokens.input":          (1000 - 200) + (2000 - 1900),
+		"gc.agent.tokens.output":         100 + 50,
+		"gc.agent.tokens.cache_read":     200 + 1900,
+		"gc.agent.tokens.cache_creation": 40,
 	}
 	for name, want := range wantTokens {
 		got, attrSets := invocationInt64Total(out, name)
@@ -121,15 +125,21 @@ func TestMessageRecordsMuseInvocationTokens(t *testing.T) {
 		}
 	}
 	// muse-spark-1.3-contributor ships in the default pricing registry, so
-	// unlike codex the cost estimate must flow: (100*0.10 + 50*0.20 +
-	// 1900*0.002)/1e6.
+	// unlike codex the cost estimate must cover both completed calls.
 	gotCost, dps := invocationCostTotal(out)
 	if dps != 1 {
 		t.Fatalf("gc.agent.invocation.cost_usd: %d datapoints, want 1 (muse is priced)", dps)
 	}
-	wantCost := (100*0.10 + 50*0.20 + 1900*0.002) / 1_000_000
+	wantCost := ((800+100+40)*0.10 + (100+50)*0.20 + (200+1900)*0.002) / 1_000_000
 	if diff := gotCost - wantCost; diff < -1e-12 || diff > 1e-12 {
 		t.Errorf("gc.agent.invocation.cost_usd = %v, want %v", gotCost, wantCost)
+	}
+	if _, err := handle.Message(context.Background(), MessageRequest{Text: "again"}); err != nil {
+		t.Fatalf("second Message: %v", err)
+	}
+	out = collectInvocationMetrics(t, reader)
+	if got, _ := invocationInt64Total(out, "gc.agent.tokens.output"); got != 150 {
+		t.Errorf("output after re-reading unchanged transcript = %d, want 150", got)
 	}
 }
 
@@ -213,6 +223,82 @@ func TestFactorySweepSessionModelUsageKeylessMuseDiscoversByWorkdir(t *testing.T
 	}
 	if f.RunID != "run-Z" || f.StepID != "" {
 		t.Fatalf("RunID/StepID = %q/%q, want run-Z/\"\" (run-level attribution)", f.RunID, f.StepID)
+	}
+}
+
+func TestFactorySweepSessionModelUsageMuseRecoversBeyondFixedTail(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	museRoot := filepath.Join(fixtureRoot, "muse")
+	workDir := filepath.Join(fixtureRoot, "work")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sinkPath := filepath.Join(fixtureRoot, "usage.jsonl")
+	factory, err := NewFactory(FactoryConfig{
+		Store:       beads.NewMemStore(),
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{museRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	filler := map[string]any{
+		"payload_type": "runtime.session",
+		"payload": map[string]any{
+			"kind":  "run",
+			"event": map[string]any{"kind": "reasoning_committed", "text": strings.Repeat("x", 70*1024)},
+		},
+	}
+	path := writeMuseWorkerSession(t, museRoot, now, "01a0bde4-25aa-7f50-8a21-1c2bd19389c7", workDir, []map[string]any{
+		museWorkerModelCompleted(1, "rec-1", "run-1", now.Add(-time.Minute).UnixMicro(), "muse-spark-1.3", 100, 10, 0, 7, 0, 0),
+		filler,
+		museWorkerModelCompleted(2, "rec-2", "run-2", now.UnixMicro(), "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+		filler,
+		museWorkerModelCompleted(3, "rec-3", "run-3", now.UnixMicro(), "muse-spark-1.3", 300, 30, 0, 0, 0, 0),
+	})
+	meta := map[string]string{
+		"provider":         "muse",
+		"work_dir":         workDir,
+		"awake_started_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
+		"slept_at":         now.Format(time.RFC3339),
+		"session_name":     "muse-wisp-1",
+	}
+	emitted, settled, err := factory.SweepSessionModelUsageAtPath(context.Background(), "muse-wisp-1", meta, path, now)
+	if err != nil || !settled || emitted != 3 {
+		t.Fatalf("initial sweep: emitted=%d settled=%t err=%v, want 3/true/nil", emitted, settled, err)
+	}
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil || len(warnings) != 0 || len(facts) != 3 {
+		t.Fatalf("initial facts: count=%d warnings=%v err=%v, want three", len(facts), warnings, err)
+	}
+	for i, want := range []int{10, 20, 30} {
+		if facts[i].OutputTokens != want {
+			t.Errorf("fact %d output=%d, want %d", i, facts[i].OutputTokens, want)
+		}
+	}
+	if facts[0].CacheCreationTokens != 7 {
+		t.Errorf("first swept fact cache creation=%d, want 7", facts[0].CacheCreationTokens)
+	}
+}
+
+func TestSessionLogAdapterMuseTailUsageHonorsCursorBeyondFixedTail(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	path := writeMuseWorkerSession(t, root, now, "01a0bde4-25aa-7f50-8a21-1c2bd19389c7", workDir, []map[string]any{
+		museWorkerModelCompleted(1, "rec-1", "run-1", now.Add(-time.Minute).UnixMicro(), "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		{"padding": strings.Repeat("x", 70*1024)},
+		museWorkerModelCompleted(2, "rec-2", "run-2", now.UnixMicro(), "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+	})
+	usages, err := (SessionLogAdapter{SearchPaths: []string{root}}).MuseTailUsage(path, "run-1")
+	if err != nil || len(usages) != 2 || usages[0].MessageID != "run-1" || usages[1].MessageID != "run-2" {
+		t.Fatalf("cursor-aware adapter: usages=%+v err=%v, want run-1 and run-2", usages, err)
 	}
 }
 

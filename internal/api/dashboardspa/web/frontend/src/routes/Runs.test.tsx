@@ -21,6 +21,11 @@ import {
   loadSupervisorRunSummarySource,
 } from '../supervisor/runSummary';
 
+const mockRunCensus = vi.hoisted(() => vi.fn());
+vi.mock('../supervisor/client', () => ({
+  supervisorApi: () => ({ runCensus: mockRunCensus }),
+}));
+
 // gascity-dashboard-bqn: regression coverage for the live-updates wiring
 // on /runs. The actual SSE / coalesce / reconnect behavior lives in
 // useGcEventRefresh (untested today — separate follow-up bead). These
@@ -184,6 +189,18 @@ beforeEach(() => {
   mockLoadRunSummaryPreview.mockReset();
   mockLoadRunSummary.mockReset();
   mockLoadRunSummaryActive.mockReset();
+  mockRunCensus.mockReset().mockResolvedValue({
+    status_counts: {
+      pending: 0,
+      active: 0,
+      waiting: 0,
+      canceling: 0,
+      completed: 0,
+      failed: 0,
+      canceled: 0,
+      skipped: 0,
+    },
+  });
   lastHookCall.prefixes = null;
   lastHookCall.onMatch = null;
   invalidateKey('runs:summary:racoon-city');
@@ -234,6 +251,60 @@ async function waitForMount() {
 }
 
 describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
+  it('keeps canonical open-run counts separate from unavailable lane details', async () => {
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 0,
+        active: 1,
+        waiting: 2,
+        canceling: 1,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    const inFlight = await screen.findByText('In flight');
+    expect(screen.getByText(/2 waiting/)).toBeTruthy();
+    expect(screen.getByText(/1 canceling/)).toBeTruthy();
+    expect(inFlight.nextElementSibling?.textContent).toBe('4');
+    const detailedLanes = screen.getByText('Detailed lanes');
+    expect(detailedLanes.nextElementSibling?.textContent).toBe('0');
+    expect(screen.getByText(/4 open runs have no lane details in this summary/i)).toBeTruthy();
+    expect(screen.queryByText(/No formula runs in flight/i)).toBeNull();
+  });
+
+  it('uses canonical run states instead of calling queued lanes active', async () => {
+    const source = buildRunSource('fresh');
+    const summary = requireRunData(source);
+    summary.totalActive = 41;
+    summary.runCounts.total = 41;
+    summary.lanes = [activeLane({ id: 'queued-wisp', title: 'Queued wisp' })];
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 41,
+        active: 0,
+        waiting: 0,
+        canceling: 0,
+        completed: 644,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/41 queued/)).toBeTruthy();
+    expect(screen.getByText(/0 running/)).toBeTruthy();
+    expect(screen.queryByText(/41 active runs/)).toBeNull();
+    expect(screen.getByText('Queued', { selector: 'span' })).toBeTruthy();
+  });
   it('paints from the fast preview source before the full run summary resolves', async () => {
     const preview = buildRunSource('fresh');
     const previewRuns = requireRunData(preview);
@@ -390,7 +461,7 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
     mount();
     await waitForMount();
     expect(screen.queryByText('Completed formula run')).toBeNull();
-    expect(await screen.findByText(/No active formula runs\. \(1 completed\.\)/i)).toBeTruthy();
+    expect(await screen.findByText(/No formula runs in flight\. \(1 completed\.\)/i)).toBeTruthy();
     // The toggle button is enabled (totalHistorical > 0) and labeled
     // with the count.
     const toggleDefault = (await screen.findByRole('button', {

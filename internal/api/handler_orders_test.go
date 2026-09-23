@@ -1166,8 +1166,8 @@ func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
 	if resp.Entries[0].BeadID != run.ID {
 		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
 	}
-	if !resp.Entries[0].CaptureOutput || !resp.Entries[0].HasOutput {
-		t.Fatalf("entry = %+v, want disabled exec order output metadata", resp.Entries[0])
+	if !resp.Entries[0].CaptureOutput || resp.Entries[0].HasOutput {
+		t.Fatalf("entry = %+v, want capture capability but no stored output", resp.Entries[0])
 	}
 }
 

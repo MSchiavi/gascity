@@ -103,6 +103,94 @@ func assignedWorkIDs(work []beads.Bead) []string {
 	return ids
 }
 
+// TestFilterAssignedWorkBeadsForSessionWakeDropsBareTemplateOnExpandedPools is
+// the gcy-bzq wake-filter regression: work assigned to the bare template of an
+// expanded-identity pool (multi-slot here; namepool and unbounded behave the
+// same) is NOT wake-reachable via a live slot session. The slot serves its own
+// instance identity only — it can never adopt the bare-template assignment, so
+// treating the template as a reachable identity shields unservable residue from
+// the orphan-release sweep (via protectedWakeWork) while pool demand keeps
+// spawning seats for it: the spawn/drain wedge. Dropping it here lets the
+// release arm reclaim it back to the pool queue.
+func TestFilterAssignedWorkBeadsForSessionWakeDropsBareTemplateOnExpandedPools(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "riga",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "riga--worker__1",
+			"alias":        "riga/worker-1",
+		},
+	}}
+	work := []beads.Bead{
+		{ID: "bare-residue", Status: "open", Assignee: "riga/worker"},
+		{ID: "slot-owned", Status: "in_progress", Assignee: "riga/worker-1"},
+	}
+	storeRefs := []string{"riga", "riga"}
+
+	got, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs)
+
+	if gotIDs := assignedWorkIDs(got); !slices.Equal(gotIDs, []string{"slot-owned"}) {
+		t.Fatalf("filtered work IDs = %v, want [slot-owned] — the bare-template assignment is "+
+			"unservable by a multi-slot pool session and must drop out of wake reachability", gotIDs)
+	}
+}
+
+// TestFilterAssignedWorkBeadsForSessionWakeKeepsBareTemplateOnSingletonPool pins
+// the other half of the gcy-bzq scoping: on a canonical-singleton pool
+// (max_active_sessions=1, no namepool) the seat DOES hold the bare template as
+// its claim identity, so a bare-template assignment stays wake-reachable even
+// in the deferred-alias window where the live seat's bead carries no alias yet.
+func TestFilterAssignedWorkBeadsForSessionWakeKeepsBareTemplateOnSingletonPool(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "riga",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "riga--worker",
+		},
+	}}
+	work := []beads.Bead{
+		{ID: "bare-claim", Status: "in_progress", Assignee: "riga/worker"},
+	}
+	storeRefs := []string{"riga"}
+
+	got, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs)
+
+	if gotIDs := assignedWorkIDs(got); !slices.Equal(gotIDs, []string{"bare-claim"}) {
+		t.Fatalf("filtered work IDs = %v, want [bare-claim] — a singleton pool seat serves the bare "+
+			"template identity, so its assignment must stay wake-reachable", gotIDs)
+	}
+}
+
 // TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores
 // pins the store projection where alignment is CONSTRUCTED. Every other test of
 // this contract exercises a consumer that is handed an already-aligned slice;
@@ -169,6 +257,48 @@ func TestFilterAssignedWorkBeadsForSessionWakeWithStoresProjectsSurvivingStores(
 		if gotStores[i] != want {
 			t.Fatalf("filtered store at index %d is not the input store for %q; the projection is misordered, so a release would write through another bead's leg", i, wantIDs[i])
 		}
+	}
+}
+
+// TestFilterAssignedWorkBeadsForSessionWakeDropsBareTemplateOnExpandedCityPool
+// is the city-scoped twin of DropsBareTemplateOnExpandedPools (gcy-bzq): a
+// city-scoped expanded-identity pool's seats serve instance identities only,
+// so a bare-template assignment is not wake-reachable via a live slot
+// session, from any store. The crossStore template arm holds only for
+// canonical-singleton city pools, whose seat holds the bare template.
+func TestFilterAssignedWorkBeadsForSessionWakeDropsBareTemplateOnExpandedCityPool(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: filepath.Join(cityPath, "riga")}},
+		Agents: []config.Agent{{
+			Name:              "auditor",
+			Scope:             "city",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "auditor",
+			"session_name": "auditor__1",
+			"alias":        "auditor-1",
+		},
+	}}
+	work := []beads.Bead{
+		{ID: "bare-residue", Status: "open", Assignee: "auditor"},
+		{ID: "slot-owned", Status: "in_progress", Assignee: "auditor-1"},
+	}
+	storeRefs := []string{"", ""}
+
+	got, _ := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, storeRefs)
+
+	if gotIDs := assignedWorkIDs(got); !slices.Equal(gotIDs, []string{"slot-owned"}) {
+		t.Fatalf("filtered work IDs = %v, want [slot-owned] — the bare-template assignment is "+
+			"unservable by a city-scoped multi-slot pool session and must drop out of wake reachability", gotIDs)
 	}
 }
 

@@ -154,7 +154,7 @@ export function FormulaRunDetailPage() {
   return (
     <section>
       <PageHeader
-        title={detail?.title ?? 'Formula Run'}
+        title={detail?.title ?? skeletonLane?.title ?? 'Formula Run'}
         synopsis={synopsis}
         meta={
           <>
@@ -200,10 +200,28 @@ export function FormulaRunDetailPage() {
           <p className="text-body text-fg-muted italic">Loading formula run.</p>
         )
       ) : unsupported ? (
-        <p className="text-body text-fg-muted" role="status">
-          Detailed step view isn&rsquo;t available for this run (v1/wisp runs are list-only) — this
-          run appears in the run list only.
-        </p>
+        <div className="space-y-6">
+          <p className="text-body text-fg-muted" role="status">
+            Detailed step view isn&rsquo;t available for this run (v1/wisp runs are list-only) — this
+            run appears in the run list only.
+          </p>
+          {skeletonLane && (
+            <>
+              <p className="text-label uppercase tracking-wider text-fg-muted">
+                {skeletonLane.phaseLabel}
+              </p>
+              <StageLadder stages={skeletonLane.stages} label={skeletonLane.title} />
+            </>
+          )}
+          {runId && (
+            <Link
+              to={`/beads?bead=${encodeURIComponent(runId)}`}
+              className="focus-mark inline-block text-label uppercase tracking-wider text-fg-muted hover:text-fg"
+            >
+              Open run bead
+            </Link>
+          )}
+        </div>
       ) : notFound ? (
         <p className="text-body text-fg-muted" role="status">
           This run&rsquo;s detail snapshot was not found. It may be a v1/wisp run, a completed run

@@ -14,17 +14,37 @@ import (
 
 func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir string, extraEnv ...string) (string, error) {
 	t.Helper()
+	cmd := dogScriptCommand(t, scriptName, binDir, cityPath, dataDir, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func dogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir string, extraEnv ...string) *exec.Cmd {
+	t.Helper()
 	root := repoRoot(t)
+	// Only fixture commands may provide gc, bd, or dolt. Inheriting the host
+	// PATH lets a removed fixture fall through to an operator's live city.
+	utilityBin := t.TempDir()
+	for _, tool := range []string{"awk", "basename", "bash", "cat", "chmod", "cmp", "cut", "date", "dirname", "du", "find", "flock", "grep", "gtimeout", "head", "jq", "ls", "mkdir", "mktemp", "mv", "python3", "readlink", "rm", "rsync", "sed", "sh", "sleep", "sort", "stat", "tail", "timeout", "tr", "wc"} {
+		lookPathInto(t, utilityBin, tool, tool)
+	}
 	cmd := exec.Command("bash", filepath.Join(root, "assets", "scripts", scriptName))
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_PACK_STATE_DIR",
 		"GC_PACK_DIR",
 		"GC_DOLT_DATA_DIR",
 		"GC_DOLT_PORT",
 		"GC_DOLT_HOST",
 		"GC_DOLT_USER",
 		"GC_DOLT_PASSWORD",
+		"GC_DOLT_BACKUP_LOCK_FILE",
+		"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS",
+		"GC_DOLT_BACKUP_SYNC_ATTEMPTS",
+		"GC_DOLT_BACKUP_SYNC_TIMEOUT_SECS",
+		"GC_DOCTOR_ADVISORY_STATE_FILE",
 		"GC_BACKUP_DATABASES",
 		"GC_BACKUP_OFFSITE_PATH",
 		"GC_BACKUP_OFFSITE_TIMEOUT",
@@ -37,7 +57,7 @@ func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir str
 		"DOLT_ESCALATE_SCRIPT",
 		"GC_MAINTENANCE_DONE_TARGET",
 	),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PATH="+binDir+string(os.PathListSeparator)+utilityBin,
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_DATA_DIR="+dataDir,
@@ -47,8 +67,7 @@ func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir str
 		"GC_DOLT_PASSWORD=",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return cmd
 }
 
 func runDogScript(t *testing.T, scriptName, binDir, cityPath, dataDir string, extraEnv ...string) string {
@@ -5350,6 +5369,49 @@ func TestBackupOrderTimeoutCoversScriptBudget(t *testing.T) {
 	}
 }
 
+func TestBackupScriptVersionProbeFailureIsNotAnOldVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		status int
+	}{
+		{name: "empty"},
+		{name: "malformed", output: "unexpected response"},
+		{name: "failed probe", output: "dolt version 2.3.5", status: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, binDir := t.TempDir(), t.TempDir()
+			gcLog := writeDogFakeGC(t, binDir)
+			writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %s\nexit %d\n", shellQuote(tc.output), tc.status))
+			out, err := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, filepath.Join(cityPath, "data"))
+			if err == nil || !strings.Contains(out, "version-unavailable") {
+				t.Fatalf("probe failure must be reported as unavailable: err=%v\n%s", err, out)
+			}
+			mail, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(mail), "below required") || strings.Contains(string(mail), "dolt-too-old") {
+				t.Fatalf("unknown version was reported as too old:\n%s", mail)
+			}
+		})
+	}
+}
+
+func TestBackupScriptCannotUseAmbientGC(t *testing.T) {
+	cityPath, binDir, ambientBin := t.TempDir(), t.TempDir(), t.TempDir()
+	ambientLog := writeDogFakeGC(t, ambientBin)
+	t.Setenv("PATH", ambientBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeBackupFakeDolt(t, binDir, "1.86.1", 0)
+	_, err := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, filepath.Join(cityPath, "data"))
+	if err == nil {
+		t.Fatal("expected version preflight to fail")
+	}
+	if _, err := os.Stat(ambientLog); !os.IsNotExist(err) {
+		t.Fatalf("missing fixture gc must not fall back to ambient gc: stat=%v", err)
+	}
+}
+
 func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -5549,14 +5611,29 @@ exit 0
 `, shellQuote(doltLogPath), shellQuote(startedFile), shellQuote(releaseFile)))
 
 	firstDone := make(chan struct{})
+	var secondDone chan struct{}
+	firstCmd := dogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	secondCmd := dogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+		"GC_BACKUP_DATABASES=prod", "GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0")
+	t.Cleanup(func() {
+		// Release and join before TempDir cleanup, including every Fatal path.
+		if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
+			t.Errorf("release backup during cleanup: %v", err)
+		}
+		<-firstDone
+		if secondDone != nil {
+			<-secondDone
+		}
+	})
 	var firstOut string
 	var firstErr error
 	go func() {
-		firstOut, firstErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+		out, err := firstCmd.CombinedOutput()
+		firstOut, firstErr = string(out), err
 		close(firstDone)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(startedFile); err == nil {
 			break
@@ -5567,19 +5644,17 @@ exit 0
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	secondDone := make(chan struct{})
+	secondDone = make(chan struct{})
 	var secondOut string
 	var secondErr error
 	go func() {
-		secondOut, secondErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-			"GC_BACKUP_DATABASES=prod",
-			"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
-		)
+		out, err := secondCmd.CombinedOutput()
+		secondOut, secondErr = string(out), err
 		close(secondDone)
 	}()
 	select {
 	case <-secondDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
 			t.Fatalf("release blocked backup runs: %v", err)
 		}
@@ -5598,7 +5673,7 @@ exit 0
 	}
 	select {
 	case <-firstDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first backup run did not finish after release")
 	}
 	if firstErr != nil {
@@ -5652,7 +5727,10 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 1)
 
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	if runErr == nil {
+		t.Fatalf("failed backup must fail the order:\n%s", out)
+	}
 	if !strings.Contains(out, "synced: 0/1") {
 		t.Fatalf("unexpected backup summary:\n%s", out)
 	}
@@ -5764,7 +5842,10 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 1)
 
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if runErr == nil {
+		t.Fatalf("partial backup must fail the order:\n%s", out)
+	}
 	if !strings.Contains(out, "synced: 1/2") {
 		t.Fatalf("unexpected backup summary:\n%s", out)
 	}
@@ -6773,8 +6854,11 @@ func TestBackupScriptSurfacesSyncDiagnosticInEscalation(t *testing.T) {
 	// failUntil far above the attempt count: every attempt fails.
 	counterPath := writeFlakyBackupFakeDolt(t, binDir, 99)
 
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+	out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 		"GC_BACKUP_DATABASES=prod", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=2")
+	if runErr == nil {
+		t.Fatalf("failed backup must fail the order:\n%s", out)
+	}
 
 	if !strings.Contains(out, "synced: 0/1") {
 		t.Fatalf("unexpected backup summary:\n%s", out)

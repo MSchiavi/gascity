@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { UsageBody } from 'gas-city-dashboard-shared/gc-supervisor';
 import { MemoryRouter } from 'react-router-dom';
 import type { RunSummarySubscription } from '../runs/runSummarySubscription';
@@ -321,6 +321,32 @@ describe('<CockpitHomePage>', () => {
     expect(screen.getByRole('cell', { name: '1.2K' })).toBeTruthy();
     expect(screen.getByRole('cell', { name: '$0.12' })).toBeTruthy();
     expect(screen.getByText('aggregate · 2 runs · 2.4K/min · $0.07/min')).toBeTruthy();
+  });
+
+  it('does not present unknown live wall time as zero when model usage exists', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run: [{
+        run: 'gc-live',
+        invocations: 2,
+        compute_facts: 0,
+        input_tokens: 5000,
+        output_tokens: 1000,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        wall_seconds: 0,
+        cost_usd_estimate: 0.12,
+        unpriced: 0,
+      }],
+    });
+
+    render(router(<CockpitHomePage />));
+
+    const row = (await screen.findByRole('cell', { name: 'gc-live' })).closest('tr');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getAllByRole('cell').at(-1)?.textContent).toBe('—');
+    expect(screen.getByText(/wall time is unavailable until a compute interval completes/i)).toBeTruthy();
   });
 
   it('marks run rates unavailable when the server predates the per-run field', async () => {

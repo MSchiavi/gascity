@@ -206,7 +206,20 @@ acquire_backup_lock() {
 
 # --- Step 1: Preflight Dolt version before backup sync ---
 
-DOLT_VERSION="$(dolt version 2>/dev/null | awk 'NR == 1 {print $NF}' || true)"
+VERSION_STATUS=0
+VERSION_OUTPUT=$(run_bounded 10 dolt version 2>&1) || VERSION_STATUS=$?
+DOLT_VERSION=$(printf '%s\n' "$VERSION_OUTPUT" | awk '$1 == "dolt" && $2 == "version" && NF == 3 {print $3; exit}')
+if [ "$VERSION_STATUS" -ne 0 ] || ! [[ "$DOLT_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][^[:space:]]+)?$ ]]; then
+    dolt_escalate \
+        "Dolt backup: version-unavailable [HIGH]" \
+        "Skipping backup sync: could not determine the Dolt version (probe exit $VERSION_STATUS). Check the Dolt executable and its startup output; no version comparison was possible." \
+        2>/dev/null || true
+    SUMMARY="backup — version-unavailable (probe exit $VERSION_STATUS)"
+    dolt_notify_done "$SUMMARY"
+    echo "backup: $SUMMARY"
+    printf '%s\n' "$VERSION_OUTPUT" >&2
+    exit 1
+fi
 if ! dolt_version_at_least "$DOLT_VERSION" "$MIN_DOLT_BACKUP_VERSION"; then
     dolt_escalate \
         "Dolt backup: dolt-too-old for backup sync [HIGH]" \
@@ -367,3 +380,6 @@ esac
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"
+if [ "$FAILED_COUNT" -gt 0 ]; then
+    exit 1
+fi

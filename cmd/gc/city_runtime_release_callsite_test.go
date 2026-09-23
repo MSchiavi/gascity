@@ -13,14 +13,14 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
+// TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveReclaimsBareTemplateResidue
 // is the production-call-site control for the rebased orphan-release stack
-// (precondition 3.0): it drives the REAL tick — beadReconcileTick — through
-// the snapshot-staleness window and asserts both cures hold AT THE CALL SITE,
-// so a lost or mis-merged hunk at city_runtime.go's release call turns this
-// red rather than leaving a green suite over regressed production code.
+// (precondition 3.0): it drives the REAL tick — beadReconcileTick — and asserts
+// both legs hold AT THE CALL SITE, so a lost or mis-merged hunk at
+// city_runtime.go's release call turns this red rather than leaving a green
+// suite over regressed production code.
 //
-// Two work beads, one per cure:
+// Two work beads, one per leg:
 //
 //   - W1 (sessionStore cure, upstream 512b79c67 / ga-g3pf0): assigned to a
 //     session whose bead lives ONLY in the relocated sessions-class store.
@@ -29,18 +29,22 @@ import (
 //     LEG D reachable-red: repoint the call site's sessionStore argument at
 //     the work store and W1 is falsely released — this test MUST fail.
 //
-//   - W2 (protectedWakeWork cure, local ce42c9c7c / gc-ft31x): assigned to
-//     the bare template identity with no session bead anywhere (the
-//     replacement bead is not yet in the pre-tick snapshot), while an open
-//     session of that template makes it reachable to the SAME tick's wake
-//     arm. Only the pre-release wake-candidate exemption retains it.
-//     LEG E reachable-red: drop protectedWakeWorkIDs(preWakeCandidates) from
-//     the call site (pass nil) and W2 is reopened — this test MUST fail.
+//   - W2 (gcy-bzq reclaim leg): assigned to the bare template identity of a
+//     multi-slot pool, with a live slot session running. No seat of an
+//     expanded-identity pool holds the bare template as a claim identity, so
+//     the assignment is unservable residue: the wake arm cannot serve it
+//     (no template-key reachability) and the release arm must reclaim it back
+//     to the pool queue (assignee cleared, route kept). This leg formerly
+//     pinned wake-protection retention (gc-ft31x Leg E); that expectation was
+//     the spawn/drain wedge — retaining unservable residue while pool demand
+//     spawns a seat per tick no hook can ever claim. The protectedWakeWork
+//     mechanics themselves remain pinned by
+//     pool_session_name_protected_wake_test.go.
 //
 // Coverage denominator, stated per the receipt rule: this control covers the
 // beadReconcileTick call site (city_runtime.go). The one-shot path's separate
 // call site in cmd_start.go is NOT covered by this test.
-func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork(t *testing.T) {
+func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveReclaimsBareTemplateResidue(t *testing.T) {
 	workStore := beads.NewMemStore()
 	sessionStore := beads.NewMemStore() // relocated [beads.classes.sessions] binding
 
@@ -73,10 +77,12 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 		t.Fatalf("create w1 session bead: %v", err)
 	}
 
-	// W2: bare-template assignee, no session bead anywhere (staleness window),
-	// wake-reachable via the open worker session in the snapshot below.
+	// W2: bare-template assignee on a multi-slot pool, with a live slot session
+	// whose own identities match neither assignee. No seat of this pool holds
+	// the bare template, so the assignment is unservable residue the tick must
+	// reclaim — not wake-protect (gcy-bzq).
 	w2, err := workStore.Create(beads.Bead{
-		Title:    "w2 routed work in the snapshot-staleness window",
+		Title:    "w2 bare-template residue on a multi-slot pool",
 		Assignee: "worker",
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	})
@@ -88,8 +94,9 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 	}
 
 	// Snapshot: one open worker session whose own identities match neither
-	// assignee — it exists to make W2 wake-reachable through the template key,
-	// exactly the "wake arm is about to serve this" half of the treadmill.
+	// assignee — pre-gcy-bzq it made W2 wake-reachable through the template
+	// key; post-fix the template key holds only for singleton pools, so the
+	// slot session neither wake-protects nor backs this residue.
 	snapshotSession := beads.Bead{
 		ID:     "sc-snap-worker",
 		Title:  "open worker session in the pre-tick snapshot",
@@ -134,17 +141,19 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 
 	cr.beadReconcileTick(context.Background(), result, newSessionBeadSnapshot([]beads.Bead{snapshotSession}), nil, false)
 
-	for _, tc := range []struct {
-		id, assignee, cure string
-	}{
-		{w1.ID, "worker-w1-live", "sessionStore (liveness read must hit the relocated sessions class, not the work store)"},
-		{w2.ID, "worker", "protectedWakeWork (release arm must not reopen work this tick's wake arm serves)"},
-	} {
-		got := callsiteControlGet(t, workStore, tc.id)
-		if got.Assignee != tc.assignee || got.Status != inProgress {
-			t.Errorf("%s was released at the production call site: assignee=%q status=%q, want assignee=%q status=%q — lost cure: %s",
-				tc.id, got.Assignee, got.Status, tc.assignee, inProgress, tc.cure)
-		}
+	gotW1 := callsiteControlGet(t, workStore, w1.ID)
+	if gotW1.Assignee != "worker-w1-live" || gotW1.Status != inProgress {
+		t.Errorf("%s was released at the production call site: assignee=%q status=%q, want assignee=%q status=%q — lost cure: %s",
+			w1.ID, gotW1.Assignee, gotW1.Status, "worker-w1-live", inProgress,
+			"sessionStore (liveness read must hit the relocated sessions class, not the work store)")
+	}
+	gotW2 := callsiteControlGet(t, workStore, w2.ID)
+	if gotW2.Assignee != "" || gotW2.Status != "open" {
+		t.Errorf("%s was NOT reclaimed at the production call site: assignee=%q status=%q, want assignee=%q status=%q — the bare-template residue on an expanded pool must be released back to the pool queue (gcy-bzq)",
+			w2.ID, gotW2.Assignee, gotW2.Status, "", "open")
+	}
+	if gotW2.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+		t.Errorf("%s lost its route on reclaim: gc.routed_to=%q, want %q", w2.ID, gotW2.Metadata[beadmeta.RoutedToMetadataKey], "worker")
 	}
 }
 

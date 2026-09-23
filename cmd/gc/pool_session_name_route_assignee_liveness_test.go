@@ -41,9 +41,66 @@ func seedRoutedWorkAssignedTo(t *testing.T, store beads.Store, title, template, 
 // real session), so the reconciler must recognize a live ephemeral session
 // for that template as backing the claim instead of treating the assignee as
 // a dead named session and reopening live routed work out from under it.
+//
+// The pool here is a canonical singleton (max_active_sessions=1, no namepool):
+// the only shape whose seat carries the bare template as its own claim
+// identity (GC_ALIAS), and therefore the only shape where a live seat can
+// actually back a bare-template claim. Expanded-identity pools (multi-slot,
+// namepool, unbounded) claim under instance identities, so the same
+// bare-template assignee there is unservable residue the sweep must reclaim
+// (gcy-bzq) — see TemplateAssigneeReleasedWhenPoolUsesExpandedIdentities.
 func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t *testing.T) {
 	store := beads.NewMemStore()
 	work := seedRoutedWorkAssignedTo(t, store, "routed to template name", "worker", "worker")
+
+	openSessions := []session.Info{
+		{ID: "sess-live", Template: "worker", Closed: false, SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"},
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		testSingletonPoolReleaseConfig(),
+		"",
+		openSessions,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	if len(released) != 0 {
+		t.Fatalf("released %v, want none — a live ephemeral session for template %q backs this bead's "+
+			"bare-template assignee, so it must stay claimed, not be reopened for the pool to reclaim",
+			released, "worker")
+	}
+}
+
+// testSingletonPoolReleaseConfig is testPoolReleaseConfig narrowed to a
+// canonical-singleton pool (max_active_sessions=1, no namepool): the only
+// pool shape whose seat holds the bare template as its claim identity.
+func testSingletonPoolReleaseConfig() *config.City {
+	return &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}}}
+}
+
+// TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenPoolUsesExpandedIdentities
+// is the gcy-bzq regression: a bare-template assignee on an expanded-identity
+// pool (multi-slot here; namepool and unbounded behave the same) is residue no
+// live seat backs — every seat claims under its own instance identity, never
+// the bare template — so a live same-template seat must NOT shield it from
+// reclamation. Retaining it wedges the bead: pool demand keeps spawning seats
+// for it (wake-known-identity) while no seat's hook can serve it (claim
+// requires an own-identity assignee or unassigned), a spawn/drain loop that
+// burns a session per cycle until the residue is cleared.
+//
+// The release must preserve gc.routed_to: clearing the assignee returns the
+// bead to the pool queue it was routed to, which is what lets a later seat
+// claim it through the normal unassigned routed tier.
+func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenPoolUsesExpandedIdentities(t *testing.T) {
+	store := beads.NewMemStore()
+	work := seedRoutedWorkAssignedTo(t, store, "bare template assignee on a multi-slot pool", "worker", "worker")
 
 	openSessions := []session.Info{
 		{ID: "sess-live", Template: "worker", Closed: false, SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"},
@@ -63,10 +120,84 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t
 		nil,
 	)
 
-	if len(released) != 0 {
-		t.Fatalf("released %v, want none — a live ephemeral session for template %q backs this bead's "+
-			"bare-template assignee, so it must stay claimed, not be reopened for the pool to reclaim",
-			released, "worker")
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released %v, want exactly [%s] — no seat of a multi-slot pool holds the bare "+
+			"template identity, so a live slot session must not shield a bare-template assignee",
+			released, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("re-read work: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released work not reopened: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "worker" {
+		t.Fatalf("released work lost its route: gc.routed_to=%q, want %q", got.Metadata["gc.routed_to"], "worker")
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_OpenBareTemplateAssigneeReleasedOnNamepool
+// is the exact gcy-bzq incident shape: an OPEN bead (never claimed) assigned
+// to the bare template of a namepool, routed to that same pool, with live
+// namepool seats running. The seats serve their own namepool identities only,
+// so the bare assignee is unclaimable residue: it must be released back to
+// the pool queue (assignee cleared, route kept), not retained while seats live.
+func TestReleaseOrphanedPoolAssignments_OpenBareTemplateAssigneeReleasedOnNamepool(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "open bare-template residue on a namepool",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig/polecat",
+		Metadata: map[string]string{"gc.routed_to": "rig/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "rig", Path: "/nonexistent/rig"}},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "rig",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+			NamepoolNames:     []string{"furiosa", "slit"},
+		}},
+	}
+	openSessions := []session.Info{
+		{ID: "sess-furiosa", Template: "rig/polecat", Alias: "rig/furiosa", Closed: false, SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"},
+		{ID: "sess-slit", Template: "rig/polecat", Alias: "rig/slit", Closed: false, SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2"},
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		cfg,
+		"",
+		openSessions,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released %v, want exactly [%s] — live namepool seats hold namepool identities, "+
+			"never the bare template, so they must not shield its residue", released, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("re-read work: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("released work not reopened: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "rig/polecat" {
+		t.Fatalf("released work lost its route: gc.routed_to=%q, want %q", got.Metadata["gc.routed_to"], "rig/polecat")
 	}
 }
 
@@ -179,6 +310,9 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenOnlyNamedSes
 // liveEphemeralSessionForTemplate is the one that decides. A rig-scoped agent is
 // addressed by its qualified template name ("repo/worker"), which is what
 // findAgentByTemplate resolves and therefore what the routed work must name.
+// The pool is a canonical singleton (max_active_sessions=1): the only shape
+// where a live seat holds the bare template, so the only shape where the
+// store-scope retain arm below is correct (gcy-bzq).
 func testRigScopedPoolReleaseConfig() *config.City {
 	return &config.City{
 		Rigs: []config.Rig{{Name: "repo", Path: "/nonexistent/repo"}},
@@ -186,7 +320,7 @@ func testRigScopedPoolReleaseConfig() *config.City {
 			Name:              "worker",
 			Dir:               "repo",
 			MinActiveSessions: intPtr(0),
-			MaxActiveSessions: intPtr(2),
+			MaxActiveSessions: intPtr(1),
 		}},
 	}
 }

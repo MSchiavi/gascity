@@ -209,7 +209,7 @@ export function StructuredBlock({ block }: { block: SessionStructuredBlock }) {
       return <InteractionBlock block={block} />;
     case 'image':
       return <ImageBlock block={block} />;
-    default:
+    case 'unknown':
       return (
         <pre className="text-body whitespace-pre-wrap leading-relaxed overflow-x-auto text-fg-muted">
           {formatInlineValue(block)}

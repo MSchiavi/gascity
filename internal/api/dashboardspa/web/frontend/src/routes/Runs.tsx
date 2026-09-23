@@ -10,7 +10,12 @@ import { SseIndicator } from '../components/SseIndicator';
 import { RunMap, RUNS_HISTORICAL_SECTION_ID } from '../components/run/RunMap';
 import { useNow } from '../contexts/NowContext';
 import { formatRelative } from '../hooks/time';
+import { useCachedData } from '../hooks/useCachedData';
+import { useVisibleRefresh } from '../hooks/useVisibleRefresh';
 import { useRunSummary } from '../runs/runSummarySubscription';
+import { activeCityOrThrow, getActiveCity } from '../api/cityBase';
+import { supervisorApi } from '../supervisor/client';
+import type { RunStatusCounts } from 'gas-city-dashboard-shared/gc-supervisor';
 
 // /runs route (gascity-dashboard-0t6, made live in gascity-dashboard-bqn). The
 // fetch, SSE refresh, and degraded-load retry now live in the shared
@@ -29,6 +34,11 @@ const HISTORY_QUERY_VALUE = '1';
 export function RunsPage() {
   const attention = useAttentionModel();
   const { source: data, loading, error, refresh, sseState } = useRunSummary();
+  const city = getActiveCity();
+  const runCensus = useCachedData(`runs:census:${city ?? 'no-city'}`, () =>
+    supervisorApi().runCensus(activeCityOrThrow('run census read')),
+  );
+  useVisibleRefresh(runCensus.refresh, 30_000);
   const [searchParams, setSearchParams] = useSearchParams();
   // gascity-dashboard-yh5i: ?history=1 toggles the historical lane
   // section. Pure render-time state — the summary already carries both
@@ -68,7 +78,8 @@ export function RunsPage() {
     [attention],
   );
 
-  const synopsis = runSynopsis(data);
+  const canonicalCounts = runCensus.data?.status_counts;
+  const synopsis = runSynopsis(data, canonicalCounts);
 
   const freshnessLabel = runs
     ? runs.status === 'fresh'
@@ -151,8 +162,8 @@ export function RunsPage() {
               <Button
                 size="sm"
                 className="w-full justify-center"
-                onClick={() => void refresh()}
-                disabled={loading}
+                onClick={() => void Promise.all([refresh(), runCensus.refresh()])}
+                disabled={loading || runCensus.loading}
               >
                 {loading ? 'Refreshing' : 'Refresh'}
               </Button>
@@ -168,6 +179,7 @@ export function RunsPage() {
           source={runs}
           now={now}
           showHistory={showHistory}
+          canonicalCounts={canonicalCounts}
           attentionSeverity={runAttentionSeverity}
         />
       )}
@@ -175,11 +187,23 @@ export function RunsPage() {
   );
 }
 
-function runSynopsis(data: SourceState<RunSummary> | undefined): string {
+function runSynopsis(
+  data: SourceState<RunSummary> | undefined,
+  canonicalCounts: RunStatusCounts | undefined,
+): string {
   if (data === undefined) return 'Loading formula run lanes.';
 
   if (data.status !== 'error') {
-    return `${data.data.totalActive} active runs across the supervisor's bead store. ${RUN_PHASE_GRAMMAR}`;
+    if (canonicalCounts !== undefined) {
+      const states = [
+        `${canonicalCounts.pending} queued`,
+        `${canonicalCounts.active} running`,
+        ...(canonicalCounts.waiting > 0 ? [`${canonicalCounts.waiting} waiting`] : []),
+        ...(canonicalCounts.canceling > 0 ? [`${canonicalCounts.canceling} canceling`] : []),
+      ];
+      return `${states.join(' · ')}. ${RUN_PHASE_GRAMMAR}`;
+    }
+    return `${data.data.totalActive} runs in flight; canonical state counts unavailable. ${RUN_PHASE_GRAMMAR}`;
   }
 
   return `Run counts unavailable: ${data.error}. ${RUN_PHASE_GRAMMAR}`;

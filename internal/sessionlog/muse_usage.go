@@ -2,6 +2,8 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"time"
 )
@@ -85,6 +87,40 @@ func ExtractMuseTailUsage(path string) ([]TailUsage, error) {
 	return parseMuseTailUsage(lines), nil
 }
 
+// ExtractMuseTailUsageSince grows a bounded transcript window to the start of
+// the file or the 16 MiB cap. A replayed cursor record near the tail could make the
+// scan stop before its first occurrence and hide later invocations. Callers
+// still filter entries at or before cursorID and deduplicate facts.
+func ExtractMuseTailUsageSince(path, cursorID string) ([]TailUsage, error) {
+	return extractMuseTailUsageSince(path, cursorID, maxUsageScanBytes)
+}
+
+// extractMuseTailUsageSince accepts a smaller cap for focused cap tests.
+func extractMuseTailUsageSince(path, _ string, maxScanBytes int64) ([]TailUsage, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	data, _, truncated, err := readTailWindowAt(f, size, maxScanBytes)
+	if err != nil {
+		return nil, err
+	}
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
+	if truncated {
+		log.Printf("sessionlog: muse usage scan cap reached path=%q window_bytes=%d; older invocations are not returned", path, maxScanBytes)
+	}
+	return parseMuseTailUsage(lines), nil
+}
+
 // ExtractMuseTailUsageFromSearchPaths reads muse tail usage only after
 // verifying path resolves under one of the merged muse session roots (the
 // defaults plus searchPaths).
@@ -96,8 +132,19 @@ func ExtractMuseTailUsageFromSearchPaths(searchPaths []string, path string) ([]T
 	return ExtractMuseTailUsage(safePath)
 }
 
+// ExtractMuseTailUsageSinceFromSearchPaths validates the transcript against
+// Muse's merged session roots before scanning from the usage cursor.
+func ExtractMuseTailUsageSinceFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
+	safePath, err := validateSearchPathFile(mergeMuseSearchPaths(searchPaths), path)
+	if err != nil {
+		return nil, err
+	}
+	return ExtractMuseTailUsageSince(safePath, cursorID)
+}
+
 func parseMuseTailUsage(lines [][]byte) []TailUsage {
 	var out []TailUsage
+	firstIndex := make(map[string]int)
 	for _, line := range lines {
 		var rec museSessionRecord
 		if err := json.Unmarshal(line, &rec); err != nil {
@@ -130,7 +177,7 @@ func parseMuseTailUsage(lines [][]byte) []TailUsage {
 		if identity == "" {
 			continue
 		}
-		out = append(out, TailUsage{
+		usage := TailUsage{
 			EntryUUID:           identity,
 			MessageID:           identity,
 			Model:               ev.Model,
@@ -140,7 +187,15 @@ func parseMuseTailUsage(lines [][]byte) []TailUsage {
 			CacheReadTokens:     cached,
 			CacheCreationTokens: u.CacheWriteTokens,
 			Timestamp:           museRecordTime(rec.RecordedAt),
-		})
+		}
+		if i, ok := firstIndex[identity]; ok {
+			// A replay may carry corrected usage, but moving a prior cursor
+			// past newer invocations would make those invocations disappear.
+			out[i] = usage
+			continue
+		}
+		firstIndex[identity] = len(out)
+		out = append(out, usage)
 	}
 	return out
 }

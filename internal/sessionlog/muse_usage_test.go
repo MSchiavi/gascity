@@ -39,7 +39,7 @@ func TestExtractMuseTailUsageParsesModelCompleted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 	writeMuseUsageLines(t, path, []string{
-		museModelCompletedLine(22, "rec-1", "run-rec-1", 1789892240839929, "muse-spark-1.3-contributor", 42653, 111, 17009, 0, 17009, 12),
+		museModelCompletedLine(22, "rec-1", "run-rec-1", 1789892240839929, "muse-spark-1.3-contributor", 42653, 111, 17009, 19, 17009, 12),
 		museGoalAttributionLine(23),
 		museModelCompletedLine(24, "rec-2", "run-rec-2", 1789892300000000, "muse-spark-1.3-contributor", 44049, 117, 43889, 0, 43889, 5),
 	})
@@ -65,8 +65,8 @@ func TestExtractMuseTailUsageParsesModelCompleted(t *testing.T) {
 	if first.CacheReadTokens != 17009 {
 		t.Errorf("CacheReadTokens = %d, want 17009", first.CacheReadTokens)
 	}
-	if first.CacheCreationTokens != 0 {
-		t.Errorf("CacheCreationTokens = %d, want 0", first.CacheCreationTokens)
+	if first.CacheCreationTokens != 19 {
+		t.Errorf("CacheCreationTokens = %d, want 19", first.CacheCreationTokens)
 	}
 	if first.ReasoningTokens != 12 {
 		t.Errorf("ReasoningTokens = %d, want 12", first.ReasoningTokens)
@@ -163,5 +163,112 @@ func TestExtractMuseTailUsageFromSearchPathsRejectsOutsideRoots(t *testing.T) {
 	})
 	if _, err := ExtractMuseTailUsageFromSearchPaths([]string{root}, path); err == nil {
 		t.Fatal("expected containment error for path outside search roots")
+	}
+	if _, err := ExtractMuseTailUsageSinceFromSearchPaths([]string{root}, path, "run-rec-2"); err == nil {
+		t.Fatal("expected cursor-aware containment error for path outside search roots")
+	}
+}
+
+func TestExtractMuseTailUsageSinceRecoversBeyondFixedTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		strings.Repeat("x", tailChunkSize+1),
+		museModelCompletedLine(2, "rec-2", "run-2", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+		museModelCompletedLine(3, "rec-3", "run-3", 1789892400000000, "muse-spark-1.3", 300, 30, 0, 0, 0, 0),
+	})
+	for _, cursor := range []string{"", "run-1"} {
+		usages, err := ExtractMuseTailUsageSince(path, cursor)
+		if err != nil {
+			t.Fatalf("ExtractMuseTailUsageSince(%q): %v", cursor, err)
+		}
+		if len(usages) != 3 || usages[0].MessageID != "run-1" || usages[1].MessageID != "run-2" || usages[2].MessageID != "run-3" {
+			t.Errorf("cursor %q: usages = %+v, want run-1, run-2, run-3", cursor, usages)
+		}
+	}
+}
+
+func TestExtractMuseTailUsageSincePartialAppendAndDuplicate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	first := museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0)
+	second := museModelCompletedLine(2, "rec-2", "run-2", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0)
+	half := len(second) / 2
+	if err := os.WriteFile(path, []byte(first+"\n"+second[:half]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usages, err := ExtractMuseTailUsageSince(path, "run-1")
+	if err != nil || len(usages) != 1 || usages[0].MessageID != "run-1" {
+		t.Fatalf("partial append: usages = %+v, err = %v", usages, err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(second[half:] + "\n" + second + "\n"); err != nil {
+		f.Close() //nolint:errcheck // report the write failure
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		usages, err = ExtractMuseTailUsageSince(path, "run-1")
+		if err != nil || len(usages) != 2 || usages[0].MessageID != "run-1" || usages[1].MessageID != "run-2" {
+			t.Fatalf("complete/duplicate append: usages = %+v, err = %v", usages, err)
+		}
+	}
+}
+
+func TestExtractMuseTailUsageSinceMissingCursorAfterTruncate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+	})
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(2, "rec-2", "run-2", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+	})
+	usages, err := ExtractMuseTailUsageSince(path, "run-1")
+	if err != nil || len(usages) != 1 || usages[0].MessageID != "run-2" {
+		t.Fatalf("truncated transcript: usages = %+v, err = %v", usages, err)
+	}
+}
+
+func TestExtractMuseTailUsageSinceDuplicateCursorKeepsEarlierPosition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-a", "run-a", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		museModelCompletedLine(2, "rec-b", "run-b", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+		museModelCompletedLine(3, "rec-a-copy", "run-a", 1789892240839929, "muse-spark-1.3", 150, 15, 0, 0, 0, 0),
+	})
+	usages, err := ExtractMuseTailUsageSince(path, "run-a")
+	if err != nil || len(usages) != 2 || usages[0].MessageID != "run-a" || usages[1].MessageID != "run-b" || usages[0].InputTokens != 150 {
+		t.Fatalf("duplicate cursor must retain its original position and latest values: usages = %+v, err = %v", usages, err)
+	}
+}
+
+func TestExtractMuseTailUsageSinceDuplicateCursorBeyondInitialWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-a", "run-a", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		strings.Repeat("x", tailChunkSize+1),
+		museModelCompletedLine(2, "rec-b", "run-b", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+		museModelCompletedLine(3, "rec-a-copy", "run-a", 1789892240839929, "muse-spark-1.3", 150, 15, 0, 0, 0, 0),
+	})
+	usages, err := ExtractMuseTailUsageSince(path, "run-a")
+	if err != nil || len(usages) != 2 || usages[0].MessageID != "run-a" || usages[1].MessageID != "run-b" {
+		t.Fatalf("duplicate cursor beyond initial window must not hide run-b: usages = %+v, err = %v", usages, err)
+	}
+}
+
+func TestExtractMuseTailUsageSinceCapReturnsNewestWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeMuseUsageLines(t, path, []string{
+		museModelCompletedLine(1, "rec-1", "run-1", 1789892240839929, "muse-spark-1.3", 100, 10, 0, 0, 0, 0),
+		strings.Repeat("x", tailChunkSize+1),
+		museModelCompletedLine(2, "rec-2", "run-2", 1789892300000000, "muse-spark-1.3", 200, 20, 0, 0, 0, 0),
+	})
+	usages, err := extractMuseTailUsageSince(path, "run-1", tailChunkSize)
+	if err != nil || len(usages) != 1 || usages[0].MessageID != "run-2" {
+		t.Fatalf("cap window: usages = %+v, err = %v", usages, err)
 	}
 }

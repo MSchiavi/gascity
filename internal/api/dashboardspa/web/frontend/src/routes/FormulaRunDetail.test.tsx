@@ -685,12 +685,17 @@ describe('FormulaRunDetailPage', () => {
       throw new ApiClientError(422, 'run is not a graph.v2 run', undefined, 'not_run_view');
     });
 
+    setCached('runs:summary:test-city', runSummarySourceWithActiveLane());
     renderPage();
 
     await screen.findByText(
       /detailed step view isn’t available for this run \(v1\/wisp runs are list-only\)/i,
     );
     expect(screen.getByText(/appears in the run list only/i)).toBeTruthy();
+    expect(screen.getByRole('list', { name: /pending adoption run stages/i })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /open run bead/i }).getAttribute('href')).toBe(
+      '/beads?bead=gc-adopt-pr-active',
+    );
     // Not the generic dead-end, and not an error alert.
     expect(screen.queryByText(/^formula run unavailable\.$/i)).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();

@@ -3297,7 +3297,7 @@ prefix = "fe"
 		Rig:      "frontend",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "true",
+		Exec:     "printf 'manual output\\n'",
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3315,6 +3315,26 @@ prefix = "fe"
 	}
 	if !slicesContain(all[0].Labels, "exec") {
 		t.Fatalf("tracking bead labels = %v, want exec", all[0].Labels)
+	}
+	if got := all[0].Metadata["convergence.gate_stdout"]; got != "manual output\n" {
+		t.Fatalf("stored output = %q, want manual output", got)
+	}
+}
+
+func TestOrderRunExecTrackedOutputPersistenceWarningKeepsExitStatus(t *testing.T) {
+	store := outputMetadataFailStore{Store: beads.NewMemStore()}
+	a := orders.Order{Name: "output", Exec: "printf 'completed\\n'"}
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, t.TempDir(), nil, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("successful exec returned %d after output write failure; stderr=%q", code, stderr.String())
+	}
+	runs := trackingBeads(t, store, "order-run:output")
+	if len(runs) != 1 || !slicesContain(runs[0].Labels, "exec") || slicesContain(runs[0].Labels, "exec-failed") {
+		t.Fatalf("successful exec mislabeled after output write failure: %+v", runs)
+	}
+	if !strings.Contains(stderr.String(), "storing exec output") {
+		t.Fatalf("missing output persistence warning: %q", stderr.String())
 	}
 }
 

@@ -63,6 +63,7 @@ export function ActivityPage() {
   const eventWindow = eventsVisible ? readEventWindow(searchParams) : DEFAULT_EVENT_WINDOW;
   const eventSignal = eventsVisible ? readEventSignal(searchParams) : 'all';
   const textFilter = eventsVisible ? normalizedParam(searchParams.get('q')) : null;
+  const eventCursor = eventsVisible ? normalizedParam(searchParams.get('cursor')) : null;
   const cityName = getActiveCity();
   const cacheKey = [
     'activity:bundle',
@@ -73,10 +74,24 @@ export function ActivityPage() {
     eventWindow,
     eventSignal,
     textFilter ?? '',
+    eventCursor ?? 'newest',
   ].join(':');
   const { data, loading, error, refresh } = useCachedData(cacheKey, () =>
-    fetchActivityBundle(mode, eventType, eventActor, eventWindow, eventSignal, textFilter),
+    fetchActivityBundle(mode, eventType, eventActor, eventWindow, eventSignal, textFilter, eventCursor),
   );
+
+  const showOlderEvents = () => {
+    const nextCursor = data?.events?.next_cursor;
+    if (!nextCursor) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('cursor', nextCursor);
+    setSearchParams(next);
+  };
+  const showNewestEvents = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('cursor');
+    setSearchParams(next);
+  };
 
   useVisibleRefresh(refresh, 30_000);
 
@@ -124,6 +139,10 @@ export function ActivityPage() {
               textFilter !== null
             }
             loading={loading}
+            cursor={eventCursor}
+            onOlder={showOlderEvents}
+            onNewest={showNewestEvents}
+            pageScopedFilters={eventSignal !== 'all' || textFilter !== null}
             attentionSeverity={(event) =>
               resourceAttentionSeverity(attention, 'activity', eventResourceId(event))
             }
@@ -158,10 +177,11 @@ async function fetchActivityBundle(
   eventWindow: string,
   eventSignal: EventSignalFilter,
   textFilter: string | null,
+  cursor: string | null,
 ): Promise<ActivityBundle> {
   const [events, deploys, commits] = await Promise.allSettled([
     shouldShow(mode, 'events')
-      ? fetchFilteredEvents(eventType, eventActor, eventWindow, eventSignal, textFilter)
+      ? fetchFilteredEvents(eventType, eventActor, eventWindow, eventSignal, textFilter, cursor)
       : Promise.resolve(null),
     shouldShow(mode, 'deploys') ? api.listBuilds() : Promise.resolve(null),
     shouldShow(mode, 'commits') ? api.listCommits('recent-all') : Promise.resolve(null),
@@ -188,11 +208,13 @@ async function fetchFilteredEvents(
   eventWindow: string,
   eventSignal: EventSignalFilter,
   textFilter: string | null,
+  cursor: string | null,
 ): Promise<SupervisorEventList> {
   const list = await listSupervisorEvents({
     since: eventWindow,
     ...(eventType === null ? {} : { type: eventType }),
     ...(eventActor === null ? {} : { actor: eventActor }),
+    ...(cursor === null ? {} : { cursor }),
   });
   const query = textFilter?.toLowerCase() ?? '';
   const items = list.items.filter((event) => {
@@ -358,12 +380,20 @@ function EventsSection({
   events,
   filterActive,
   loading,
+  cursor,
+  onOlder,
+  onNewest,
+  pageScopedFilters,
   attentionSeverity,
 }: {
   error?: string;
   events: SupervisorEventList | null;
   filterActive: boolean;
   loading: boolean;
+  cursor: string | null;
+  onOlder: () => void;
+  onNewest: () => void;
+  pageScopedFilters: boolean;
   attentionSeverity: (event: TypedEventStreamEnvelope) => 'attention' | 'watch' | null;
 }) {
   const items = events?.items ?? [];
@@ -371,7 +401,7 @@ function EventsSection({
   return (
     <ActivitySection
       title="Supervisor events"
-      meta={events === null ? null : `${events.total} events`}
+      meta={events === null ? null : `${events.items.length} events on this page`}
     >
       {error !== undefined && (
         <p className="text-body text-accent" role="alert">
@@ -381,6 +411,11 @@ function EventsSection({
       {events?.partial === true && (
         <p className="text-body text-warn">
           Event history incomplete{partialErrors.length > 0 ? `: ${partialErrors.join('; ')}` : '.'}
+        </p>
+      )}
+      {pageScopedFilters && (
+        <p className="text-label text-fg-muted">
+          Search and signal filters apply to this page. Use Older events to inspect more of the selected window.
         </p>
       )}
       <ActivityTable label="Supervisor events">
@@ -411,7 +446,7 @@ function EventsSection({
                 : error !== undefined
                   ? 'Event history unavailable.'
                   : filterActive
-                    ? 'No supervisor events match these filters.'
+                    ? 'No supervisor events match these filters on this page.'
                     : 'No supervisor events in this window.'}
             </EmptyRow>
           ) : (
@@ -440,6 +475,20 @@ function EventsSection({
           )}
         </tbody>
       </ActivityTable>
+      {(cursor !== null || events?.next_cursor) && (
+        <div className="flex gap-3">
+          {cursor !== null && (
+            <Button size="sm" onClick={onNewest} disabled={loading}>
+              Newest events
+            </Button>
+          )}
+          {events?.next_cursor && (
+            <Button size="sm" onClick={onOlder} disabled={loading}>
+              Older events
+            </Button>
+          )}
+        </div>
+      )}
     </ActivitySection>
   );
 }
@@ -705,6 +754,7 @@ function setActivitySearchParam(
   } else {
     next.set(key, value);
   }
+  next.delete('cursor');
   setSearchParams(next);
 }
 

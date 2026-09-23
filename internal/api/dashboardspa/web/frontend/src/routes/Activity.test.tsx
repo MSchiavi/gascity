@@ -14,7 +14,7 @@ interface FetchCall {
 }
 
 const fetchCalls: FetchCall[] = [];
-let eventFetchMode: 'ok' | 'partial' | 'fail' | 'duplicate-audit' = 'ok';
+let eventFetchMode: 'ok' | 'partial' | 'fail' | 'duplicate-audit' | 'pages' = 'ok';
 
 beforeEach(() => {
   setActiveCity('test-city');
@@ -61,6 +61,34 @@ beforeEach(() => {
             partial: false,
             total: 2,
           });
+        }
+        if (eventFetchMode === 'pages') {
+          return jsonResponse(
+            url.searchParams.get('cursor') === 'older-cursor'
+              ? {
+                  items: [
+                    supervisorEvent({
+                      actor: 'maintainer',
+                      message: 'older crash detail',
+                      seq: 5,
+                      type: 'session.crashed',
+                    }),
+                  ],
+                  total: 101,
+                }
+              : {
+                  items: [
+                    supervisorEvent({
+                      actor: 'controller',
+                      message: 'new order event',
+                      seq: 100,
+                      type: 'order.completed',
+                    }),
+                  ],
+                  next_cursor: 'older-cursor',
+                  total: 101,
+                },
+          );
         }
         return jsonResponse({
           items: [
@@ -130,6 +158,19 @@ afterEach(() => {
 });
 
 describe('ActivityPage', () => {
+  it('pages through the selected window and labels client-side search as page-scoped', async () => {
+    eventFetchMode = 'pages';
+    renderPage('/activity?mode=events&q=crash');
+
+    expect(await screen.findByText(/no supervisor events match these filters/i)).toBeTruthy();
+    expect(screen.getByText(/search and signal filters apply to this page/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /older events/i }));
+
+    expect(await screen.findByText('older crash detail')).toBeTruthy();
+    expect(fetchCalls.some((call) => call.query.get('cursor') === 'older-cursor')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /newest events/i }));
+    expect(await screen.findByText(/no supervisor events match these filters/i)).toBeTruthy();
+  });
   it('loads supervisor events through the generated-client proxy and honors type deep links', async () => {
     renderPage('/activity?mode=events&type=session.crashed');
 
@@ -200,7 +241,7 @@ describe('ActivityPage', () => {
       target: { value: 'archive' },
     });
     expect(
-      await within(table).findByText('No supervisor events match these filters.'),
+      await within(table).findByText('No supervisor events match these filters on this page.'),
     ).toBeTruthy();
   });
 

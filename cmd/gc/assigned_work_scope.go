@@ -344,7 +344,13 @@ func filterAssignedWorkBeadsForSessionWakeWithStores(
 			for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 				crossStore[strings.TrimSpace(id)] = struct{}{}
 			}
-			crossStore[strings.TrimSpace(template)] = struct{}{}
+			// Template reachability holds only where a seat can serve a
+			// bare-template assignment: canonical-singleton pools, whose seat
+			// holds the bare template as its claim identity. See the rig-scoped
+			// arm below (gcy-bzq).
+			if agentCfg.UsesCanonicalSingletonPoolIdentity() {
+				crossStore[strings.TrimSpace(template)] = struct{}{}
+			}
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
@@ -376,7 +382,19 @@ func filterAssignedWorkBeadsForSessionWakeWithStores(
 				add(id, ref)
 			}
 		}
-		add(template, storeRef)
+		// The template key marks a bare-template assignment wake-reachable via
+		// any live same-template seat — but only a canonical-singleton pool
+		// seat (max_active_sessions=1, no namepool) holds the bare template as
+		// its claim identity and can serve such an assignment. Expanded-identity
+		// pools (multi-slot, namepool, unbounded) claim under instance
+		// identities, so the key would shield unservable residue from the
+		// orphan-release sweep (via protectedWakeWork) while pool demand keeps
+		// spawning drain-loop seats for it (gcy-bzq). The release gate
+		// (liveEphemeralSessionForTemplate) carries the same scoping: either
+		// site alone still wedges.
+		if agentCfg.UsesCanonicalSingletonPoolIdentity() {
+			add(template, storeRef)
+		}
 	}
 
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))

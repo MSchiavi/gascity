@@ -413,6 +413,7 @@ TEST_ENV = env -i \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
+	GC_PUSH_GATE_SLOT_HELD="$${GC_PUSH_GATE_SLOT_HELD-}" \
 	XDG_RUNTIME_DIR="$$XDG_RUNTIME_DIR" \
 	GOPATH="$(GOPATH_VAL)" \
 	GOCACHE="$(GOCACHE_VAL)" \
@@ -421,6 +422,7 @@ TEST_ENV = env -i \
 	GOROOT="$${GOROOT:-$(GOROOT_VAL)}" \
 	GOENV="$${GOENV-}" \
 	GOFLAGS="$${GOFLAGS-}" \
+	GOMAXPROCS="$${GOMAXPROCS-}" \
 	GO111MODULE="$${GO111MODULE-}" \
 	GOEXPERIMENT="$${GOEXPERIMENT-}" \
 	GOPROXY="$${GOPROXY-}" \
@@ -469,7 +471,7 @@ test-ci-policy:
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	scripts/with-push-gate-slot test -- $(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
 ## the provider's own tier under internal/runtime/herdr, plus the controller's
@@ -489,9 +491,11 @@ MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+	scripts/with-push-gate-slot test-mac -- $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
 
-LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
+# Empty means the runner computes a shared default after acquiring a gate
+# slot. A make-line or environment override remains an explicit job count.
+LOCAL_TEST_JOBS ?=
 
 # Deliberately empty: scripts/test-local-parallel owns the default per-package
 # go test budget (ga-9au). Duplicating the number here is how the unit sweep and
@@ -503,14 +507,14 @@ GO_TEST_TIMEOUT ?=
 
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
+	$(TEST_ENV) LOCAL_TEST_LOG_DIR="$${LOCAL_TEST_LOG_DIR-}" GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.
 test-fsys-darwin-compile:
 	@tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
+	scripts/with-push-gate-slot fsys-darwin-compile -- $(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
 
 ## test-pack-registry-live: run the opt-in gascity-packs registry canary
 test-pack-registry-live:
@@ -539,12 +543,12 @@ sync-bd-corpus:
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
 ## process-backed lifecycle coverage routed out of the default fast loop
 test-cmd-gc-process:
-	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout 25m ./cmd/gc
+	scripts/with-push-gate-slot test-cmd-gc-process -- $(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout 25m ./cmd/gc
 	$(MAKE) test-productmetrics-testhook
 
 ## test-productmetrics-testhook: run the focused tagged product-metrics contracts
 test-productmetrics-testhook:
-	$(TEST_ENV) scripts/go-test-observable test-productmetrics-testhook -- -tags productmetrics_testhook -count=1 -run '^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$' ./cmd/gc
+	scripts/with-push-gate-slot test-productmetrics-testhook -- $(TEST_ENV) scripts/go-test-observable test-productmetrics-testhook -- -tags productmetrics_testhook -count=1 -run '^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$' ./cmd/gc
 
 CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6

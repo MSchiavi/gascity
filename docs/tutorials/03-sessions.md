@@ -256,6 +256,26 @@ counted compaction segments. The HTTP API's `tail` query parameter still counts
 compaction segments.
 </Accordion>
 
+## Pausing work and stopping the city
+
+A message asking an agent to stop spawning is not a scheduler setting. Use
+`gc suspend` to block new starts and work acquisition city-wide, or
+`gc rig suspend <name>` / `gc agent suspend <name>` for a narrower scope.
+Suspension asks running sessions to drain; it does not prove their work is
+finished. Use the matching `resume` command to remove the hold.
+
+`gc runtime drain-ack` acknowledges one session's drain. It neither completes
+its bead nor freezes its pool: outstanding work can cause a replacement session
+to start. Retry limits must therefore live in the work's durable state, not
+only in a session's conversation. When a workflow exhausts its retry budget,
+record the failure on the bead and use the supported `blocked` status before
+acknowledging drain. Verify the update succeeded; `escalated` is not a standard
+bead status.
+
+`gc stop` shuts down the city runtime and its backing services. It is not a
+"finish all queued work" command. Check bead state and push results separately;
+an empty runtime does not establish that changes were pushed or merged.
+
 ## What's next
 
 You've created sessions on demand, kept the mayor alive with an always-on

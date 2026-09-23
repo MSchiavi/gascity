@@ -1066,14 +1066,17 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			if !tc.wantFailure && err != nil {
 				t.Fatalf("rendered script failed; want %q to be non-fatal\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
-			if !strings.Contains(log, "gc runtime drain-ack") {
-				t.Fatalf("%q path did not drain-ack\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
+			if got := strings.Contains(log, "gc runtime drain-ack"); got == tc.wantFailure {
+				t.Fatalf("%q drain-ack = %v, want %v\nlog:\n%s\noutput:\n%s", tc.fail, got, !tc.wantFailure, log, out)
 			}
 			if !strings.Contains(log, tc.fail) {
 				t.Fatalf("command log missing injected failure %q\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
 			if !tc.wantFailure && !strings.Contains(log, "bd close bead-1") {
 				t.Fatalf("%q path did not close work after nonessential failure\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
+			}
+			if !strings.Contains(log, "bd close bead-1 --actor session-1 --reason") {
+				t.Fatalf("close must use concrete session identity, not pool alias\nlog:\n%s", log)
 			}
 		})
 	}
@@ -1152,8 +1155,11 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS"),
 		"GC_BEAD_ID=bead-1",
+		"GC_SESSION_ID=session-1",
+		"GC_SESSION_NAME=dog-1",
+		"GC_ALIAS=dog-pool",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,

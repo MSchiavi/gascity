@@ -20,6 +20,17 @@
 # Source this file in other scripts:
 #   source "$repo_root/scripts/lib/inner-parallelism.sh"
 
+# Reserve the configured number of gate slots up front. Counting only occupied
+# slots lets the first invocation take the whole host and race the second one.
+gc_shared_auto_jobs() {
+  local raw_jobs="$1" slot_count="$2" shared_jobs
+  [[ "$raw_jobs" =~ ^[0-9]+$ && "$raw_jobs" -gt 0 &&
+     "$slot_count" =~ ^[0-9]+$ && "$slot_count" -gt 0 ]] || return 1
+  shared_jobs=$((raw_jobs / slot_count))
+  (( shared_jobs > 0 )) || shared_jobs=1
+  printf '%s\n' "$shared_jobs"
+}
+
 # gc_inner_parallelism LOCAL_JOBS JOB_COUNT prints the -p value each
 # concurrent job should pass to `go test`. GC_TEST_INNER_P overrides the
 # computation outright (must be a positive integer) for deterministic tests.

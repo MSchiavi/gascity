@@ -1,0 +1,224 @@
+import { useCallback, useMemo, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { Button } from '../components/Button';
+import { Field } from '../components/Field';
+import { PageHeader } from '../components/PageHeader';
+import { StatusBadge } from '../components/StatusBadge';
+import { Table, type TableColumn } from '../components/Table';
+import { useNow } from '../contexts/NowContext';
+import { formatRelative } from '../hooks/time';
+import { useCachedData } from '../hooks/useCachedData';
+import { useVisibleRefresh } from '../hooks/useVisibleRefresh';
+import { getActiveCity } from '../api/cityBase';
+import {
+  getSupervisorOrder,
+  getSupervisorOrderHistoryDetail,
+  listSupervisorOrderHistory,
+  type SupervisorOrderHistoryEntry,
+} from '../supervisor/orderReads';
+
+// /orders/:name route: read-only drilldown for one order. The :name param
+// carries the scoped name (URL-encoded); the backend resolves both plain
+// and scoped names. Shows the description, exec/formula source, trigger
+// config, and recent run history.
+
+export function OrderDetailPage() {
+  const { name = '' } = useParams<{ name: string }>();
+  const scopedName = useMemo(() => {
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  }, [name]);
+  const now = useNow();
+  const city = getActiveCity();
+  const [selectedOutput, setSelectedOutput] = useState<{
+    city: string | null;
+    entry: SupervisorOrderHistoryEntry;
+  } | null>(null);
+  const visibleOutput = selectedOutput?.city === city ? selectedOutput.entry : null;
+
+  const orderSource = useCachedData(`orders:detail:${city ?? 'no-city'}:${scopedName}`, () =>
+    getSupervisorOrder(scopedName),
+  );
+  const historySource = useCachedData(`orders:history:${city ?? 'no-city'}:${scopedName}`, () =>
+    listSupervisorOrderHistory(scopedName),
+  );
+
+  const refresh = useCallback(async () => {
+    await Promise.all([orderSource.refresh(), historySource.refresh()]);
+  }, [orderSource, historySource]);
+  useVisibleRefresh(refresh, 30_000);
+
+  const order = orderSource.data ?? null;
+  const history = historySource.data ?? [];
+  const loading = orderSource.loading || historySource.loading;
+  const error =
+    [orderSource.error, historySource.error]
+      .filter((value): value is string => value !== null)
+      .join('; ') || null;
+
+  return (
+    <section>
+      <PageHeader
+        title={order?.name ?? scopedName}
+        synopsis={order?.description ?? (order === null && error === null ? 'Loading order.' : null)}
+        meta={
+          <>
+            {error && (
+              <span className="normal-case text-body text-accent" role="alert">
+                {error}
+              </span>
+            )}
+            <Link to="/orders">
+              <Button size="sm" tone="quiet">
+                ← Orders
+              </Button>
+            </Link>
+            <Button
+              size="sm"
+              className="w-full justify-center"
+              onClick={() => void refresh()}
+              disabled={loading}
+            >
+              {loading ? 'Refreshing' : 'Refresh'}
+            </Button>
+          </>
+        }
+      />
+
+      {order === null ? (
+        error === null && <p className="text-body text-fg-muted italic">Loading order.</p>
+      ) : (
+        <div className="space-y-10">
+          <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="Status">
+              {order.enabled ? (
+                <StatusBadge tone="ok" label="enabled" />
+              ) : (
+                <StatusBadge tone="neutral" label="disabled" />
+              )}
+            </Field>
+            <Field label="Scope">{order.rig ?? 'city'}</Field>
+            <Field label="Runs">{order.formula ?? order.exec ?? '—'}</Field>
+            <Field label="Trigger">{order.trigger ?? '—'}</Field>
+            <Field label="On">{order.on ?? '—'}</Field>
+            <Field label="Interval">{order.interval ?? '—'}</Field>
+            <Field label="Schedule">{order.schedule ?? '—'}</Field>
+            <Field label="Check">{order.check ?? '—'}</Field>
+            <Field label="Pool">{order.pool ?? '—'}</Field>
+          </dl>
+
+          <section>
+            <h2 className="text-label uppercase tracking-wider text-fg-muted mb-3">Recent runs</h2>
+            <Table
+              columns={historyColumns(now, visibleOutput, (entry) =>
+                setSelectedOutput(entry === null ? null : { city, entry }),
+              )}
+              rows={history}
+              rowKey={historyRowKey}
+              empty="No recorded runs."
+            />
+            {visibleOutput !== null && (
+              <OrderOutputViewer key={`${city ?? 'no-city'}:${historyRowKey(visibleOutput)}`} entry={visibleOutput} />
+            )}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function historyRowKey(entry: SupervisorOrderHistoryEntry): string {
+  return `${entry.store_ref}:${entry.bead_id}`;
+}
+
+function historyColumns(
+  now: number,
+  selectedOutput: SupervisorOrderHistoryEntry | null,
+  setSelectedOutput: (entry: SupervisorOrderHistoryEntry | null) => void,
+): ReadonlyArray<TableColumn<SupervisorOrderHistoryEntry>> {
+  return [
+    {
+      key: 'time',
+      label: 'Time',
+      render: (entry) => (
+        <span title={entry.created_at}>{formatRelative(entry.created_at, now)} ago</span>
+      ),
+    },
+    {
+      key: 'duration',
+      label: 'Duration',
+      render: (entry) => <span>{formatDurationMs(entry.duration_ms)}</span>,
+    },
+    {
+      key: 'exit',
+      label: 'Exit',
+      render: (entry) => <span>{entry.exit_code ?? '—'}</span>,
+    },
+    {
+      key: 'outcome',
+      label: 'Outcome',
+      render: (entry) =>
+        entry.error !== undefined && entry.error !== '' ? (
+          <StatusBadge tone="stuck" label={entry.error} />
+        ) : (
+          <span className="text-fg-muted">—</span>
+        ),
+    },
+    {
+      key: 'bead',
+      label: 'Bead',
+      render: (entry) => <span className="text-fg-muted">{entry.bead_id}</span>,
+    },
+    {
+      key: 'output',
+      label: 'Output',
+      render: (entry) =>
+        entry.has_output ? (
+          <Button
+            size="sm"
+            tone="quiet"
+            onClick={() => setSelectedOutput(
+              selectedOutput?.bead_id === entry.bead_id && selectedOutput.store_ref === entry.store_ref
+                ? null
+                : entry,
+            )}
+          >
+            {selectedOutput?.bead_id === entry.bead_id && selectedOutput.store_ref === entry.store_ref
+              ? 'Hide output'
+              : 'View output'}
+          </Button>
+        ) : (
+          <span className="text-fg-muted">—</span>
+        ),
+    },
+  ];
+}
+
+function OrderOutputViewer({ entry }: { entry: SupervisorOrderHistoryEntry }) {
+  const city = getActiveCity();
+  const { data, loading, error } = useCachedData(
+    `orders:output:${city ?? 'no-city'}:${entry.store_ref}:${entry.bead_id}`,
+    () => getSupervisorOrderHistoryDetail(entry.bead_id, entry.store_ref),
+  );
+  return (
+    <section aria-label={`Output for ${entry.bead_id}`} className="mt-5 space-y-2">
+      <h3 className="text-label uppercase tracking-wider text-fg-muted">Run output · {entry.bead_id}</h3>
+      {loading && <p className="text-body text-fg-muted">Loading output.</p>}
+      {error !== null && <p className="text-body text-accent" role="alert">{error}</p>}
+      {data !== undefined && (
+        <pre className="text-body whitespace-pre-wrap break-words rounded-sm bg-surface-tint p-4">{data.output || 'No stored output returned.'}</pre>
+      )}
+    </section>
+  );
+}
+
+function formatDurationMs(raw: string | undefined): string {
+  if (raw === undefined) return '—';
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}

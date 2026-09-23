@@ -1,0 +1,165 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { invalidate } from '../api/cache';
+import { NowProvider } from '../contexts/NowContext';
+import {
+  listSupervisorOrderChecks,
+  listSupervisorOrders,
+  type SupervisorOrder,
+  type SupervisorOrderCheck,
+} from '../supervisor/orderReads';
+import { OrdersPage } from './Orders';
+
+let mockOrders: SupervisorOrder[] = [];
+let mockChecks: SupervisorOrderCheck[] = [];
+let ordersMode: 'ok' | 'fail' = 'ok';
+let checksMode: 'ok' | 'fail' = 'ok';
+
+vi.mock('../supervisor/orderReads', () => ({
+  listSupervisorOrders: vi.fn(async () => {
+    if (ordersMode === 'fail') throw new Error('orders unavailable');
+    return mockOrders;
+  }),
+  listSupervisorOrderChecks: vi.fn(async () => {
+    if (checksMode === 'fail') throw new Error('checks unavailable');
+    return mockChecks;
+  }),
+}));
+
+function order(overrides: Partial<SupervisorOrder> = {}): SupervisorOrder {
+  return {
+    capture_output: false,
+    enabled: true,
+    name: 'triage-sweep',
+    scoped_name: 'triage-sweep',
+    timeout_ms: 60000,
+    type: 'agent',
+    ...overrides,
+  };
+}
+
+function check(overrides: Partial<SupervisorOrderCheck> = {}): SupervisorOrderCheck {
+  return {
+    due: false,
+    name: 'triage-sweep',
+    reason: 'cooldown: 5m remaining',
+    scoped_name: 'triage-sweep',
+    ...overrides,
+  };
+}
+
+function renderPage() {
+  return render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <NowProvider>
+        <OrdersPage />
+      </NowProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe('OrdersPage', () => {
+  beforeEach(() => {
+    invalidate('orders');
+    mockOrders = [];
+    mockChecks = [];
+    ordersMode = 'ok';
+    checksMode = 'ok';
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders one row per order with trigger, schedule, and scope', async () => {
+    mockOrders = [
+      order({ trigger: 'interval', interval: '15m' }),
+      order({
+        name: 'farmer-sweep',
+        scoped_name: 'farmer-sweep:rig:demo-repo',
+        rig: 'demo-repo',
+        trigger: 'schedule',
+        schedule: '0 9 * * *',
+      }),
+    ];
+    renderPage();
+
+    expect(
+      (await screen.findByRole('link', { name: 'triage-sweep' })).getAttribute('href'),
+    ).toBe('/orders/triage-sweep');
+    expect(screen.getByRole('link', { name: 'farmer-sweep' }).getAttribute('href')).toBe(
+      '/orders/farmer-sweep%3Arig%3Ademo-repo',
+    );
+    expect(screen.getByText('interval')).toBeDefined();
+    expect(screen.getByText('15m')).toBeDefined();
+    expect(screen.getByText('0 9 * * *')).toBeDefined();
+    expect(screen.getByText('city')).toBeDefined();
+    expect(screen.getByText('demo-repo')).toBeDefined();
+  });
+
+  it('joins check state onto each row: last run plus due badge', async () => {
+    mockOrders = [order()];
+    mockChecks = [
+      check({
+        due: true,
+        reason: 'elapsed 20m >= interval 15m',
+        last_run: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+        last_run_outcome: 'ok',
+      }),
+    ];
+    renderPage();
+
+    expect(await screen.findByText('due now')).toBeDefined();
+    expect(screen.getByText(/ago/)).toBeDefined();
+    expect(screen.getByText(/ok/)).toBeDefined();
+  });
+
+  it('shows the check reason when an order is not due', async () => {
+    mockOrders = [order()];
+    mockChecks = [check()];
+    renderPage();
+
+    expect(await screen.findByText('cooldown: 5m remaining')).toBeDefined();
+  });
+
+  it('flags disabled orders', async () => {
+    mockOrders = [order({ enabled: false })];
+    renderPage();
+
+    expect(await screen.findByText('disabled')).toBeDefined();
+  });
+
+  it('renders an empty state when no orders are registered', async () => {
+    renderPage();
+
+    expect(await screen.findByText('No orders registered.')).toBeDefined();
+  });
+
+  it('surfaces fetch errors without crashing', async () => {
+    ordersMode = 'fail';
+    renderPage();
+
+    expect(await screen.findByRole('alert')).toBeDefined();
+  });
+
+  it('refreshes both sources from the Refresh button', async () => {
+    mockOrders = [order()];
+    renderPage();
+    expect(await screen.findByRole('link', { name: 'triage-sweep' })).toBeDefined();
+    const callsBefore =
+      vi.mocked(listSupervisorOrders).mock.calls.length +
+      vi.mocked(listSupervisorOrderChecks).mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    });
+
+    await waitFor(() => {
+      const callsAfter =
+        vi.mocked(listSupervisorOrders).mock.calls.length +
+        vi.mocked(listSupervisorOrderChecks).mock.calls.length;
+      expect(callsAfter).toBeGreaterThan(callsBefore);
+    });
+  });
+});

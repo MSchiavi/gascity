@@ -35,6 +35,8 @@ source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 # shellcheck source=lib/inner-parallelism.sh
 source "$repo_root/scripts/lib/inner-parallelism.sh"
+# shellcheck source=lib/test-failure-summary.sh
+source "$repo_root/scripts/lib/test-failure-summary.sh"
 
 # Cross-invocation concurrency bound (ga-owh20p): at most
 # PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
@@ -49,13 +51,26 @@ source "$repo_root/scripts/lib/inner-parallelism.sh"
 # trap. GC_PUSH_GATE_NO_CAP=1 bypasses the cap entirely for one invocation.
 # shellcheck source=push-gate-lock-lib.sh disable=SC1091
 source "$repo_root/scripts/push-gate-lock-lib.sh"
-gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$repo_root/.git/gate-slots"
+gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$(push_gate_git_slots_dir)" || {
+  echo "push-gate: cannot resolve a shared slot directory" >&2
+  exit 1
+}
 gate_fd=""
 gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${mode}"
-if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
-  echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
-  exit 75
+gate_active=1
+if [[ "${GC_PUSH_GATE_NO_CAP:-}" == "1" ]]; then
+  gate_active=0
 fi
+if [[ "${GC_PUSH_GATE_SLOT_HELD:-}" != "1" ]]; then
+  if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
+    echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+    exit 75
+  fi
+  if [[ -z "$gate_fd" ]]; then
+    gate_active=0
+  fi
+fi
+export GC_PUSH_GATE_SLOT_HELD=1
 
 # This invocation owns every process it fans out (gas-px0). The fan-out runs as
 # one supervised process group so a signal here tears down xargs, every shard
@@ -85,7 +100,16 @@ trap 'gc_local_parallel_on_signal HUP' HUP
 # these vars at test-binary init in every covered package.
 unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 
-local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
+if [[ -n "${LOCAL_TEST_JOBS:-}" ]]; then
+  local_jobs="$LOCAL_TEST_JOBS"
+else
+  raw_jobs="$("$repo_root/scripts/test-local-job-count")"
+  gate_slots=1
+  if [[ "$gate_active" -eq 1 ]]; then
+    gate_slots="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
+  fi
+  local_jobs="$(gc_shared_auto_jobs "$raw_jobs" "$gate_slots")"
+fi
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
 # One per-package go test budget for the unit sweep and the cmd/gc shards. The
@@ -151,7 +175,7 @@ add_unit_core_job() {
 # slots section. Driving the script directly keeps it out of the Go AST scan
 # entirely, so it needs no baseline change and no owner exemption.
 add_push_gate_lock_selftest_job() {
-  add_job "push-gate-lock-selftest" "bash scripts/test-push-gate-lock.sh"
+  add_job "push-gate-lock-selftest" "bash scripts/test-push-gate-lock.sh && bash scripts/test-with-push-gate-slot.sh"
 }
 
 # Same census-avoidance rationale as add_push_gate_lock_selftest_job above:
@@ -159,6 +183,10 @@ add_push_gate_lock_selftest_job() {
 # resourcecensus scope=all audit total.
 add_local_concurrency_selftest_job() {
   add_job "local-concurrency-selftest" "bash scripts/test-local-concurrency.sh"
+}
+
+add_failure_summary_selftest_job() {
+  add_job "failure-summary-selftest" "bash scripts/test-local-failure-summary.sh"
 }
 
 add_cmd_gc_shards() {
@@ -213,6 +241,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_failure_summary_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -227,6 +256,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_failure_summary_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs
@@ -249,6 +279,9 @@ fi
 # -parallel scope caveat) (ga-04m84s).
 inner_p="$(gc_inner_parallelism "$local_jobs" "${#jobspecs[@]}")"
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=${inner_p}"
+# -p limits packages, not t.Parallel within a package. Keep each test binary
+# inside the same per-job CPU budget, including single-package cmd/gc shards.
+export TEST_LOCAL_GOMAXPROCS="$inner_p"
 
 cleanup_log_dir=1
 if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
@@ -344,6 +377,8 @@ run_fan_out() {
     CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
     CGO_LDFLAGS="${CGO_LDFLAGS-}" \
     GOFLAGS="${GOFLAGS-}" \
+    GOMAXPROCS="${TEST_LOCAL_GOMAXPROCS}" \
+    GC_PUSH_GATE_SLOT_HELD="${GC_PUSH_GATE_SLOT_HELD-}" \
     GO111MODULE="${GO111MODULE-}" \
     GOEXPERIMENT="${GOEXPERIMENT-}" \
     GOPROXY="${GOPROXY-}" \
@@ -359,6 +394,7 @@ run_fan_out() {
   else
     status=$?
     echo "[$label] failed with exit ${status}; log: ${log}" >&2
+    printf "%s\n" "$status" >"${log}.failed"
     sed -n '"'"'1,240p'"'"' "$log" >&2
     exit "$status"
   fi
@@ -376,7 +412,10 @@ if [[ "$status" -eq 0 ]]; then
   fi
   echo "All ${mode} jobs passed"
 else
-  echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
+  summary_file="$log_dir/failure-summary.txt"
+  gc_test_failure_report "$log_dir" >"$summary_file"
+  echo "One or more ${mode} jobs failed; complete failure summary: ${summary_file}" >&2
+  cat "$summary_file" >&2
 fi
 
 exit "$status"

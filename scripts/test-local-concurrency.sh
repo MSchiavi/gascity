@@ -54,6 +54,11 @@ assert_contains() {
 # load-awareness alone — never accidentally gated by the real host's live
 # /proc/meminfo or cgroup budget.
 HUGE_MEM_KIB=$((64 * 1024 * 1024))
+fixture_dir="$(mktemp -d)"
+trap 'rm -rf "$fixture_dir"' EXIT
+printf '%s\n' '#!/bin/sh' 'if [ "$1" = "-n" ] && [ "$2" = "vm.loadavg" ]; then' \
+    '  printf "{ 5.75 0.00 0.00 }\n"' 'fi' >"$fixture_dir/sysctl"
+chmod +x "$fixture_dir/sysctl"
 
 # ============================================================
 # Part A — scripts/test-local-job-count (real subprocess, pinned cpus/memory)
@@ -73,6 +78,10 @@ assert_eq "loadavg.small_machine_skips_load_adjustment" "$GOT" "4"
 
 GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG=3.9 "$JOB_COUNT")"
 assert_eq "loadavg.truncates_fractional_load" "$GOT" "13"
+
+GOT="$(PATH="$fixture_dir:$PATH" GC_TEST_LOCAL_CPUS=12 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" \
+    GC_TEST_LOCAL_LOADAVG_FILE="$fixture_dir/missing" "$JOB_COUNT")"
+assert_eq "loadavg.macos_sysctl_fallback" "$GOT" "7"
 
 MALFORMED_OUT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG=abc "$JOB_COUNT" 2>&1)"
 MALFORMED_RC=$?
@@ -137,6 +146,13 @@ MALFORMED_INNER_OUT="$(GC_TEST_INNER_P=abc gc_inner_parallelism 16 9 2>&1)"
 MALFORMED_INNER_RC=$?
 assert_true "inner_p.malformed_override_nonzero_exit" test "$MALFORMED_INNER_RC" -ne 0
 assert_contains "inner_p.malformed_override_names_var" "$MALFORMED_INNER_OUT" "GC_TEST_INNER_P"
+
+GOT="$(gc_shared_auto_jobs 8 2 2>/dev/null)"
+assert_eq "shared_budget.reserves_both_slots_before_second_starts" "$GOT" "4"
+GOT="$(gc_shared_auto_jobs 3 2 2>/dev/null)"
+assert_eq "shared_budget.rounds_down" "$GOT" "1"
+GOT="$(gc_shared_auto_jobs 1 2 2>/dev/null)"
+assert_eq "shared_budget.keeps_one_job" "$GOT" "1"
 
 # ============================================================
 # Static wiring assertions against scripts/test-local-parallel
