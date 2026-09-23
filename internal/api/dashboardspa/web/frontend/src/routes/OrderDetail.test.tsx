@@ -376,6 +376,8 @@ describe('OrderDetailPage', () => {
   });
 
   it('renders recent run history with duration and exit code', async () => {
+    const noExitCode = historyEntry({ bead_id: 'bd-3' });
+    delete noExitCode.exit_code;
     mockHistory = [
       historyEntry({ outcome: 'success' }),
       historyEntry({
@@ -384,7 +386,7 @@ describe('OrderDetailPage', () => {
         exit_code: '1',
         outcome: 'failed',
       }),
-      historyEntry({ bead_id: 'bd-3', exit_code: undefined }),
+      noExitCode,
     ];
     renderDetail();
 

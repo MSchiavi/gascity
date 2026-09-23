@@ -91,7 +91,7 @@ describe('supervisor order reads', () => {
     const result = await listSupervisorOrders(true);
 
     expect(listOrders).toHaveBeenCalledWith('test-city', { include_disabled: true });
-    expect(result[0].enabled).toBe(false);
+    expect(result[0]?.enabled).toBe(false);
   });
 
   it('normalizes a null orders list to an empty array', async () => {

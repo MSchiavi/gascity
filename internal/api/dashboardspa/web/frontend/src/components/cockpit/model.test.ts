@@ -115,6 +115,8 @@ describe('cockpit telemetry derivation', () => {
     expect(noWall?.tokensPerMinute).toBeNull();
     expect(noWall?.dollarsPerMinute).toBeNull();
     expect(noWall?.timingUnknown).toBe(true);
+    const rowWithoutTiming = row({});
+    delete rowWithoutTiming.timing_complete;
 
     for (const rows of [
       [
@@ -124,7 +126,7 @@ describe('cockpit telemetry derivation', () => {
       [row({ compute_facts: 0, wall_seconds: 0 })],
       [row({ wall_seconds: null as unknown as number })],
       [row({ timing_complete: false })],
-      [row({ timing_complete: undefined })],
+      [rowWithoutTiming],
     ]) {
       expect(aggregateRunRates(rows)).toMatchObject({
         tokensPerMinute: null,
@@ -133,7 +135,7 @@ describe('cockpit telemetry derivation', () => {
       });
     }
     expect(runRateAvailable(row({}))).toBe(true);
-    expect(runRateAvailable(row({ timing_complete: undefined }))).toBe(false);
+    expect(runRateAvailable(rowWithoutTiming)).toBe(false);
   });
 
   it('carries each lane real stage total and retry provenance', () => {
