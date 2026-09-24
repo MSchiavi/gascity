@@ -3268,10 +3268,14 @@ func TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot(t *testing.T
 // capturingRecorder is an in-memory events.Recorder used in tests that
 // need to assert which events were emitted.
 type capturingRecorder struct {
-	events []events.Event
+	events   []events.Event
+	onRecord func(events.Event)
 }
 
 func (c *capturingRecorder) Record(e events.Event) {
+	if c.onRecord != nil {
+		c.onRecord(e)
+	}
 	c.events = append(c.events, e)
 }
 
@@ -3348,8 +3352,9 @@ func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 0")
-	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	probe, assertCalls := injectedStrandedProbe(t, detachedProbeAlive)
+	rec := emitStrandedDiagnosticForTestWithProbe(t, store, &session, probe, nil)
+	assertCalls(1)
 
 	if stranded := rec.strandedEvents(); len(stranded) != 0 {
 		t.Fatalf("session.stranded events = %d, want 0 while detached probe is alive; events: %+v", len(stranded), rec.events)
@@ -3369,8 +3374,25 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *test
 func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 1")
-	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	probe, assertCalls := injectedStrandedProbe(t, detachedProbeDead)
+	observedClearBeforeEmit := false
+	rec := emitStrandedDiagnosticForTestWithProbe(t, store, &session, probe, func(e events.Event) {
+		if e.Type != events.SessionStranded {
+			return
+		}
+		got, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get work bead while emitting diagnostic: %v", err)
+		}
+		if got.Metadata[detachedProbeMetadataKey] != "" {
+			t.Fatalf("gc.detached = %q at diagnostic emission, want already cleared", got.Metadata[detachedProbeMetadataKey])
+		}
+		observedClearBeforeEmit = true
+	})
+	assertCalls(1)
+	if !observedClearBeforeEmit {
+		t.Fatal("did not observe detached marker state at diagnostic emission")
+	}
 
 	stranded := rec.strandedEvents()
 	if len(stranded) != 1 {
@@ -3379,6 +3401,13 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testin
 	if !strings.Contains(stranded[0].Message, work.ID) {
 		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
 	}
+	var payload api.SessionStrandedPayload
+	if err := json.Unmarshal(stranded[0].Payload, &payload); err != nil {
+		t.Fatalf("decode dead-probe session.stranded payload: %v", err)
+	}
+	if len(payload.WorkBeadIDs) != 1 || payload.WorkBeadIDs[0] != work.ID {
+		t.Fatalf("dead-probe payload work bead ids = %v, want [%q]", payload.WorkBeadIDs, work.ID)
+	}
 	got, err := store.Get(work.ID)
 	if err != nil {
 		t.Fatalf("Get work bead: %v", err)
@@ -3386,13 +3415,26 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testin
 	if got.Metadata[detachedProbeMetadataKey] != "" {
 		t.Fatalf("gc.detached = %q, want cleared before diagnostic emit", got.Metadata[detachedProbeMetadataKey])
 	}
+	stamped, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if stamped.Metadata[strandedEventEmittedKey] == "" {
+		t.Fatal("durable stranded-event throttle marker missing after diagnostic")
+	}
+	again := emitStrandedDiagnosticForTestWithProbe(t, store, &session, probe, nil)
+	assertCalls(1)
+	if len(again.strandedEvents()) != 0 {
+		t.Fatalf("repeated session.stranded events = %d, want 0 after throttle marker", len(again.strandedEvents()))
+	}
 }
 
 func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 2")
-	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	probe, assertCalls := injectedStrandedProbe(t, detachedProbeError)
+	rec := emitStrandedDiagnosticForTestWithProbe(t, store, &session, probe, nil)
+	assertCalls(1)
 
 	stranded := rec.strandedEvents()
 	if len(stranded) != 1 {
@@ -3408,6 +3450,59 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testin
 	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
 		t.Fatalf("gc.detached = %q, want preserved after probe error", got.Metadata[detachedProbeMetadataKey])
 	}
+}
+
+func TestEmitSessionStrandedDiagnostic_DetachedProbeTimeoutEmitsAndRetains(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	probe, assertCalls := injectedStrandedProbe(t, detachedProbeTimeout)
+	rec := emitStrandedDiagnosticForTestWithProbe(t, store, &session, probe, nil)
+	assertCalls(1)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1 after probe timeout; events: %+v", len(stranded), rec.events)
+	}
+	if !strings.Contains(stranded[0].Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+		t.Fatalf("gc.detached = %q, want preserved after probe timeout", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func injectedStrandedProbe(t *testing.T, status detachedProbeStatus) (func(context.Context, string) detachedProbeResult, func(int)) {
+	t.Helper()
+	const wantSpec = "tmux:gctest-stranded:soak-loop"
+	calls := 0
+	probe := func(ctx context.Context, spec string) detachedProbeResult {
+		if ctx == nil {
+			t.Fatal("detached probe received nil context")
+		}
+		if spec != wantSpec {
+			t.Fatalf("detached probe descriptor = %q, want %q", spec, wantSpec)
+		}
+		calls++
+		result := detachedProbeResult{Status: status, Spec: detachedProbeSpec{Kind: "tmux", Socket: "gctest-stranded", Session: "soak-loop"}}
+		switch status {
+		case detachedProbeError:
+			result.Err = errors.New("injected probe error")
+		case detachedProbeTimeout:
+			result.Err = context.DeadlineExceeded
+		}
+		return result
+	}
+	assertCalls := func(want int) {
+		t.Helper()
+		if calls != want {
+			t.Fatalf("detached probe calls = %d, want %d", calls, want)
+		}
+	}
+	return probe, assertCalls
 }
 
 func createDetachedStrandedWork(t *testing.T, store beads.Store, detachedSpec string) (beads.Bead, beads.Bead) {
@@ -3446,14 +3541,18 @@ func createDetachedStrandedWork(t *testing.T, store beads.Store, detachedSpec st
 }
 
 func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *beads.Bead) *capturingRecorder {
+	return emitStrandedDiagnosticForTestWithProbe(t, store, session, probeDetachedWork, nil)
+}
+
+func emitStrandedDiagnosticForTestWithProbe(t *testing.T, store beads.Store, session *beads.Bead, probe func(context.Context, string) detachedProbeResult, onRecord func(events.Event)) *capturingRecorder {
 	t.Helper()
-	rec := &capturingRecorder{}
+	rec := &capturingRecorder{onRecord: onRecord}
 	var stderr bytes.Buffer
 	info, err := sessionFrontDoor(store).Get(session.ID)
 	if err != nil {
 		t.Fatalf("sessionFrontDoor.Get(%s): %v", session.ID, err)
 	}
-	emitSessionStrandedDiagnostic(
+	emitSessionStrandedDiagnosticWithProbe(
 		"",
 		nil,
 		store,
@@ -3464,6 +3563,7 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		rec,
 		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
 		&stderr,
+		probe,
 	)
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
