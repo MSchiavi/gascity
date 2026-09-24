@@ -116,6 +116,7 @@ func (r *sseStreamRegistry) unregister(lease *sseStreamLease) {
 	r.mu.Unlock()
 }
 
+//nolint:revive // Lease and stream context form one admission pair; keep the lease first at call sites.
 func (r *sseStreamRegistry) invoke(lease *sseStreamLease, ctx context.Context, callback func()) bool {
 	r.mu.Lock()
 	if r.stopping {

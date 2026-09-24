@@ -539,7 +539,8 @@ func TestSupervisorShutdownSkipsLateTypedSSECallbacks(t *testing.T) {
 
 func TestSSEStreamCallbackIsNotInvokedAfterStop(t *testing.T) {
 	streams := newSSEStreamRegistry()
-	streamCtx, lease, finish := streams.begin(context.Background(), nil)
+	writer := &shutdownSSERecorder{ResponseRecorder: httptest.NewRecorder(), flushed: make(chan struct{})}
+	streamCtx, lease, finish := streams.begin(context.Background(), writer)
 	defer finish()
 
 	if err := streams.stop(); err != nil {

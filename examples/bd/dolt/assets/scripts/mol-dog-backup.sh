@@ -7,7 +7,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/_notify.sh"
 

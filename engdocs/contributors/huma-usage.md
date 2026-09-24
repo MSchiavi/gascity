@@ -301,17 +301,11 @@ do not support precheck errors; an op like `stream-events` that
 needs to 503 before committing stream headers has to use our
 `registerSSE` wrapper instead.
 
-These wrappers also register each typed stream with its owning
-`SupervisorMux`. Shutdown cancels only those stream contexts and sets one
-shared write deadline one second in the future on active stream responses.
-Senders refuse to start new frames after cancellation, giving an in-progress
-frame time to finish; the deadline is cleared when the stream handler returns.
-This shutdown-only grace does not guarantee completion for an arbitrarily slow
-client. Ordinary requests do not use this registry. Keep SSE handlers reading
-their request context through `hctx.Context()` so they inherit cancellation.
-Integration code using `ServeSeededCity` owns its HTTP server and must cancel
-the supplied parent context or call the returned stop function before
-`http.Server.Shutdown`.
+These wrappers register each typed stream with its owning `SupervisorMux`.
+See the [API Control Plane's SSE rules](../architecture/api-control-plane.md#34-no-hand-constructed-json-for-domain-data)
+for shutdown behavior and the integration-only `ServeSeededCity` ownership
+contract. Keep SSE handlers reading their request context through
+`hctx.Context()` so they inherit cancellation.
 
 ## 10. When to reach for `CreateHooks = nil`
 

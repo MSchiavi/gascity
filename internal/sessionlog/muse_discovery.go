@@ -193,10 +193,6 @@ func museSessionWorkspaceMatchesScan(path, workDir string) (match bool, clean bo
 	r := bufio.NewReader(f)
 	budget := museWorkspaceProbeBytes
 	for budget > 0 {
-		chunk := budget
-		if chunk > 64*1024 {
-			chunk = 64 * 1024
-		}
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
 			if ws := museWorkspaceRootInLine(line); ws != "" && pathutil.SamePath(ws, workDir) {
@@ -301,7 +297,7 @@ func findMuseSessionByIDInRange(root, workDir, sessionID string, firstDay, lastD
 // findMuseSessionByIDUnbounded walks the whole date tree newest-first for the
 // session dir. Used only when no window bounds the lookup.
 func findMuseSessionByIDUnbounded(root, workDir, sessionID string) string {
-	yearDirs, _ := splitMuseSessionRoots(root)
+	yearDirs := splitMuseSessionRoots(root)
 	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
 	for _, year := range yearDirs {
 		yearDir := filepath.Join(root, year)
@@ -318,20 +314,20 @@ func findMuseSessionByIDUnbounded(root, workDir, sessionID string) string {
 	return ""
 }
 
-// splitMuseSessionRoots separates year directories from anything else under
-// a muse sessions root.
-func splitMuseSessionRoots(dir string) (yearDirs, extraRoots []string) {
+// splitMuseSessionRoots returns directory names under a muse sessions root.
+func splitMuseSessionRoots(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil
+		return nil
 	}
+	yearDirs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		yearDirs = append(yearDirs, e.Name())
 	}
-	return yearDirs, nil
+	return yearDirs
 }
 
 // FindMuseSessionFileByIDNoWindow resolves a muse transcript by provider
