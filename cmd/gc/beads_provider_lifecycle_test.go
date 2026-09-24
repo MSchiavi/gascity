@@ -4540,7 +4540,10 @@ wait
 
 	cancel := waitForProviderLifecycleCancel(t, cancelCh)
 	t.Cleanup(cancel)
-	pid := waitForProviderTestChildPID(t, childPIDFile)
+	// Readiness, not behavior: under sharded gate load, spawn latency can
+	// exceed the 5s default, so give the child pid file a 30s budget
+	// (gcy-3uk). The cancellation assertions below keep their tight bounds.
+	pid := waitForProviderTestChildPIDTimeout(t, childPIDFile, 30*time.Second)
 	t.Cleanup(func() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
@@ -4578,7 +4581,10 @@ wait
 		resultCh <- runProviderOpWithEnvContext(ctx, script, append(os.Environ(), "GC_TEST_CHILD_PID="+childPIDFile), "health")
 	}()
 
-	pid := waitForProviderTestChildPID(t, childPIDFile)
+	// Readiness, not behavior: under sharded gate load, spawn latency can
+	// exceed the 5s default, so give the child pid file a 30s budget
+	// (gcy-3uk). The cancellation assertions below keep their tight bounds.
+	pid := waitForProviderTestChildPIDTimeout(t, childPIDFile, 30*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 	cancel()
 
@@ -4617,7 +4623,10 @@ wait
 
 	cancel := waitForProviderLifecycleCancel(t, cancelCh)
 	t.Cleanup(cancel)
-	pid := waitForProviderTestChildPID(t, childPIDFile)
+	// Readiness, not behavior: under sharded gate load, spawn latency can
+	// exceed the 5s default, so give the child pid file a 30s budget
+	// (gcy-3uk). The cancellation assertions below keep their tight bounds.
+	pid := waitForProviderTestChildPIDTimeout(t, childPIDFile, 30*time.Second)
 	t.Cleanup(func() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
@@ -4668,7 +4677,19 @@ func waitForProviderLifecycleCancel(t *testing.T, cancelCh <-chan context.Cancel
 
 func waitForProviderTestChildPID(t *testing.T, path string) int {
 	t.Helper()
-	pidText := waitForProviderTestNonEmptyFile(t, path, 5*time.Second)
+	return waitForProviderTestChildPIDTimeout(t, path, 5*time.Second)
+}
+
+// waitForProviderTestChildPIDTimeout is waitForProviderTestChildPID with a
+// caller-chosen budget. Readiness waits must tolerate gate-load spawn
+// latency: under sharded gate load, goroutine scheduling plus fork/exec of
+// the provider script can exceed the 5s budget that suffices unloaded —
+// through the full native-env managed-recovery chain (gcy-8jz) and even for
+// direct spawns (gcy-3uk). The behavioral assertions a test pins after the
+// child is observable keep their own tight bounds.
+func waitForProviderTestChildPIDTimeout(t *testing.T, path string, timeout time.Duration) int {
+	t.Helper()
+	pidText := waitForProviderTestNonEmptyFile(t, path, timeout)
 	pid, err := strconv.Atoi(pidText)
 	if err != nil {
 		t.Fatalf("parse child pid: %v", err)
