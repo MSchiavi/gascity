@@ -6982,8 +6982,25 @@ func TestBackupScriptRetriesMarginalSyncFailure(t *testing.T) {
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	counterPath := writeFlakyBackupFakeDolt(t, binDir, 1)
+	timeoutLogPath := filepath.Join(binDir, "gtimeout.log")
+	writeExecutable(t, filepath.Join(binDir, "gtimeout"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%%s\n' "$*" >> %s
+shift 2
+exec "$@"
+`, shellQuote(timeoutLogPath)))
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	timeoutCalls, err := os.ReadFile(timeoutLogPath)
+	if err != nil {
+		t.Fatalf("read bounded-command calls: %v", err)
+	}
+	if !strings.Contains(string(timeoutCalls), "--kill-after=2 10 dolt version\n") {
+		t.Fatalf("version probe was not bounded: %s", timeoutCalls)
+	}
+	if got := strings.Count(string(timeoutCalls), "--kill-after=2 120 dolt backup sync prod-backup\n"); got != 2 {
+		t.Fatalf("bounded backup sync calls = %d, want 2: %s", got, timeoutCalls)
+	}
 
 	if !strings.Contains(out, "synced: 1/1") {
 		t.Fatalf("a sync that succeeds on retry must count as synced:\n%s", out)

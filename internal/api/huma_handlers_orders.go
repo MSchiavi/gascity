@@ -118,7 +118,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			cr.LastRun = &ts
 		}
 		if len(history) > 0 {
-			if run, ok := orders.RunFromTrackingBead(history[0].bead); ok {
+			if run, ok := history[0].run, history[0].hasRun; ok {
 				if outcome := run.Outcome.Display(); outcome != "" {
 					cr.LastRunOutcome = &outcome
 				}
@@ -273,7 +273,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
-		if run, ok := orders.RunFromTrackingBead(b); ok {
+		if run, ok := result.run, result.hasRun; ok {
 			if outcome := run.Outcome.Display(); outcome != "" {
 				entry.Outcome = &outcome
 			}
@@ -380,6 +380,13 @@ type orderHistoryDetailResponse struct {
 type orderHistoryStoreBead struct {
 	storeRef string
 	bead     beads.Bead
+	run      orders.OrderRun
+	hasRun   bool
+}
+
+func orderHistoryRow(storeRef string, bead beads.Bead) orderHistoryStoreBead {
+	run, ok := orders.RunFromTrackingBead(bead)
+	return orderHistoryStoreBead{storeRef: storeRef, bead: bead, run: run, hasRun: ok}
 }
 
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
@@ -532,7 +539,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 				continue
 			}
 			seen[key] = true
-			results = append(results, orderHistoryStoreBead{storeRef: info.ref, bead: row})
+			results = append(results, orderHistoryRow(info.ref, row))
 		}
 	}
 
@@ -577,7 +584,7 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 				continue
 			}
 			seen[key] = true
-			results = append(results, orderHistoryStoreBead{storeRef: info.ref, bead: row})
+			results = append(results, orderHistoryRow(info.ref, row))
 		}
 	}
 

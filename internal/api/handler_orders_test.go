@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -584,6 +585,7 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 
 func TestHandleOrderCheckRunsConditionByDefault(t *testing.T) {
 	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
 	marker := t.TempDir() + "/condition-ran"
 	fs.autos = []orders.Order{
 		{Name: "router", Formula: "review-pr", Trigger: "condition", Check: "printf x >> " + strconv.Quote(marker)},
@@ -1088,6 +1090,7 @@ func TestHandleOrderCheckFallsBackToLiveHistoryWhenCacheUnavailable(t *testing.T
 func TestHandleOrderCheckRejectsUnavailableRigStore(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "missing"})
 	delete(fs.stores, "missing")
 	fs.autos = []orders.Order{
 		{Name: "city-review", Formula: "mol-adopt-pr-v2", Trigger: "manual"},

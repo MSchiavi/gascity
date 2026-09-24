@@ -1687,6 +1687,14 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stops := 0
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		if path != cityPath {
+			t.Fatalf("shutdown path = %q, want %q", path, cityPath)
+		}
+		stops++
+		return nil
+	})
 
 	done := make(chan struct{})
 	close(done)
@@ -1706,6 +1714,9 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
 	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	if stops != 1 {
+		t.Fatalf("provider stops = %d, want 1", stops)
+	}
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
