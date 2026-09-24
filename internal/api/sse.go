@@ -134,13 +134,11 @@ func registerSSE[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
-				bw, encoder, flusher := beginSSEStream(hctx)
-				response, _ := bw.(http.ResponseWriter)
-				streamCtx, finish := streams.begin(hctx.Context(), response)
+				bodyWriter := hctx.BodyWriter()
+				response, _ := bodyWriter.(http.ResponseWriter)
+				streamCtx, lease, finish := streams.begin(hctx.Context(), response)
 				defer finish()
-				if streamCtx.Err() != nil {
-					return
-				}
+				bw, encoder, flusher := beginSSEStream(hctx)
 				send := func(msg sse.Message) error {
 					if err := streamCtx.Err(); err != nil {
 						return err
@@ -151,7 +149,9 @@ func registerSSE[I any](
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				stream(huma.WithContext(hctx, streamCtx), input, send)
+				streams.invoke(lease, streamCtx, func() {
+					stream(huma.WithContext(hctx, streamCtx), input, send)
+				})
 			},
 		}, nil
 	})
@@ -208,13 +208,11 @@ func registerSSEStringID[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
-				bw, encoder, flusher := beginSSEStream(hctx)
-				response, _ := bw.(http.ResponseWriter)
-				streamCtx, finish := streams.begin(hctx.Context(), response)
+				bodyWriter := hctx.BodyWriter()
+				response, _ := bodyWriter.(http.ResponseWriter)
+				streamCtx, lease, finish := streams.begin(hctx.Context(), response)
 				defer finish()
-				if streamCtx.Err() != nil {
-					return
-				}
+				bw, encoder, flusher := beginSSEStream(hctx)
 				send := func(msg StringIDMessage) error {
 					if err := streamCtx.Err(); err != nil {
 						return err
@@ -225,7 +223,9 @@ func registerSSEStringID[I any](
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				stream(huma.WithContext(hctx, streamCtx), input, send)
+				streams.invoke(lease, streamCtx, func() {
+					stream(huma.WithContext(hctx, streamCtx), input, send)
+				})
 			},
 		}, nil
 	})

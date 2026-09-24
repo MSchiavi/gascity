@@ -119,6 +119,7 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 		&singleStateResolver{state: state},
 		nil, false, state.Version(), "", time.Now(),
 	)
+	mux.sseStreams.setParent(ctx)
 	// A harness dials an arbitrary httptest host; permit any Host so the
 	// production allowlist does not 421 the seeded stack.
 	mux.WithAnyHostAllowed()

@@ -537,6 +537,34 @@ func TestSupervisorShutdownSkipsLateTypedSSECallbacks(t *testing.T) {
 	}
 }
 
+func TestSSEStreamCallbackIsNotInvokedAfterStop(t *testing.T) {
+	streams := newSSEStreamRegistry()
+	streamCtx, lease, finish := streams.begin(context.Background(), nil)
+	defer finish()
+
+	if err := streams.stop(); err != nil {
+		t.Fatalf("stop streams: %v", err)
+	}
+	called := false
+	if streams.invoke(lease, streamCtx, func() { called = true }) || called {
+		t.Fatal("stream callback ran after stop")
+	}
+}
+
+func TestSeededSSEStreamContextCancelsWithParentSynchronously(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	streams := newSSEStreamRegistry()
+	streams.setParent(parent)
+	streamCtx, _, finish := streams.begin(context.Background(), nil)
+	defer finish()
+
+	cancelParent()
+	if streamCtx.Err() == nil {
+		t.Fatal("stream context was not canceled with its parent")
+	}
+}
+
 func TestSupervisorShutdownUnblocksStalledSSEWrite(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "seeded"

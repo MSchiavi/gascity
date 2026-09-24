@@ -21,6 +21,7 @@ type sseStreamRegistry struct {
 	active   map[*sseStreamLease]struct{}
 	stopDone chan struct{}
 	stopErr  error
+	parent   context.Context
 }
 
 func newSSEStreamRegistry() *sseStreamRegistry {
@@ -33,12 +34,43 @@ func newSSEStreamRegistry() *sseStreamRegistry {
 // begin returns a stream-only context derived from the request context. The
 // returned finish function unregisters the stream and clears any shutdown
 // deadline before net/http finalizes the response.
-func (r *sseStreamRegistry) begin(parent context.Context, writer http.ResponseWriter) (context.Context, func()) {
+func (r *sseStreamRegistry) setParent(parent context.Context) {
 	if parent == nil {
 		parent = context.Background()
 	}
+	r.mu.Lock()
+	r.parent = parent
+	r.mu.Unlock()
+}
+
+func (r *sseStreamRegistry) begin(requestCtx context.Context, writer http.ResponseWriter) (context.Context, *sseStreamLease, func()) {
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	r.mu.Lock()
+	parent := r.parent
+	r.mu.Unlock()
+	hasOwnerParent := parent != nil
+	if !hasOwnerParent {
+		parent = requestCtx
+	}
+	var cancelDeadline context.CancelFunc
+	if hasOwnerParent {
+		if deadline, ok := requestCtx.Deadline(); ok {
+			parent, cancelDeadline = context.WithDeadline(parent, deadline)
+		}
+	}
 	ctx, cancel := context.WithCancel(parent)
-	lease := &sseStreamLease{cancel: cancel}
+	var stopRequest func() bool
+	if hasOwnerParent {
+		if requestCtx.Err() != nil {
+			cancel()
+		} else {
+			stopRequest = context.AfterFunc(requestCtx, cancel)
+		}
+	}
+	streamCtx := sseRequestContext{Context: ctx, request: requestCtx}
+	lease := &sseStreamLease{cancel: cancel, cancelDeadline: cancelDeadline, stopRequest: stopRequest}
 	if writer != nil {
 		lease.response = http.NewResponseController(writer)
 	}
@@ -54,8 +86,15 @@ func (r *sseStreamRegistry) begin(parent context.Context, writer http.ResponseWr
 			}
 		})
 	}
-	return ctx, finish
+	return streamCtx, lease, finish
 }
+
+type sseRequestContext struct {
+	context.Context
+	request context.Context
+}
+
+func (c sseRequestContext) Value(key any) any { return c.request.Value(key) }
 
 // register adds a live response unless shutdown has started. A late response
 // is canceled immediately, covering requests that passed Huma precheck before
@@ -75,6 +114,22 @@ func (r *sseStreamRegistry) unregister(lease *sseStreamLease) {
 	r.mu.Lock()
 	delete(r.active, lease)
 	r.mu.Unlock()
+}
+
+func (r *sseStreamRegistry) invoke(lease *sseStreamLease, ctx context.Context, callback func()) bool {
+	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return false
+	}
+	_, active := r.active[lease]
+	if !active || ctx.Err() != nil {
+		r.mu.Unlock()
+		return false
+	}
+	r.mu.Unlock()
+	callback()
+	return true
 }
 
 // stop cancels every active stream and gives its response writer one shared
@@ -120,11 +175,13 @@ func (r *sseStreamRegistry) stop() error {
 }
 
 type sseStreamLease struct {
-	mu          sync.Mutex
-	finished    bool
-	deadlineSet bool
-	cancel      context.CancelFunc
-	response    *http.ResponseController
+	mu             sync.Mutex
+	finished       bool
+	deadlineSet    bool
+	cancel         context.CancelFunc
+	cancelDeadline context.CancelFunc
+	stopRequest    func() bool
+	response       *http.ResponseController
 }
 
 func (l *sseStreamLease) cancelOnly() {
@@ -158,7 +215,15 @@ func (l *sseStreamLease) finish() error {
 		return nil
 	}
 	l.finished = true
+	if l.stopRequest != nil {
+		l.stopRequest()
+		l.stopRequest = nil
+	}
 	l.cancel()
+	if l.cancelDeadline != nil {
+		l.cancelDeadline()
+		l.cancelDeadline = nil
+	}
 	if !l.deadlineSet {
 		return nil
 	}
