@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -441,5 +442,58 @@ func TestOrderHistoryStoreRefUnchangedOnSingleStoreCity(t *testing.T) {
 	}
 	if body.StoreRef != "city:test-city" {
 		t.Fatalf("detail store_ref without a hint = %q, want city:test-city", body.StoreRef)
+	}
+}
+
+type fixedHistoryRowsStore struct {
+	beads.Store
+	row beads.Bead
+}
+
+func (s fixedHistoryRowsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Label == "order-run:review:rig:myrig" {
+		return []beads.Bead{s.row}, nil
+	}
+	return s.Store.List(q)
+}
+
+func TestOrderHistoryKeepsStoreOrderForEqualTimestamps(t *testing.T) {
+	st := newFakeState(t)
+	st.autos = []orders.Order{{Name: "review", Rig: "myrig"}}
+	createdAt := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+	store := func(id string) beads.Store {
+		return &fixedHistoryRowsStore{
+			Store: beads.NewMemStore(),
+			row: beads.Bead{
+				ID:        id,
+				CreatedAt: createdAt,
+				Status:    "closed",
+				Labels:    []string{"order-run:review:rig:myrig", "wisp"},
+			},
+		}
+	}
+	st.stores["myrig"] = store("rig-run")
+	st.cityBeadStore = store("city-run")
+	st.ordersBeadStore = store("orders-run")
+
+	w := httptest.NewRecorder()
+	newTestCityHandler(t, st).ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		cityURL(st, "/orders/history?scoped_name=review:rig:myrig&limit=2"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Entries []struct {
+			BeadID   string `json:"bead_id"`
+			StoreRef string `json:"store_ref"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Entries) != 2 ||
+		response.Entries[0].BeadID != "rig-run" || response.Entries[0].StoreRef != "rig:myrig" ||
+		response.Entries[1].BeadID != "city-run" || response.Entries[1].StoreRef != "city:test-city" {
+		t.Fatalf("entries = %+v, want stable rig then city prefix at equal timestamps", response.Entries)
 	}
 }

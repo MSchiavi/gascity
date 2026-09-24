@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,9 +38,7 @@ const (
 // or list), so no class discovery is needed; it reads the bare tier (a by-id
 // detail read is cache-tolerant). A bead that carries no order-run label / order:
 // title still decodes (best-effort scoped name) so a caller that already holds a
-// valid handle gets its fields back. Provided as the typed by-id contract; the
-// API order-history-detail path (an exempt by-id federation surface that still
-// emits raw labels on the wire) will migrate onto it in WI-6/7.
+// valid handle gets its fields back.
 func (s *Store) Get(handle string) (OrderRun, error) {
 	if s.store.Store == nil {
 		return OrderRun{}, fmt.Errorf("orders get %q: nil store", handle)
@@ -52,21 +51,20 @@ func (s *Store) Get(handle string) (OrderRun, error) {
 	return decodeRun(name, b), nil
 }
 
-// RunDetail is the by-id detail projection: an OrderRun paired with the run's
-// exec-gate output. It is provided as the typed by-id contract that will back the
-// order-history-detail handler once that path migrates off its raw bead + inline
-// convergence.gate_* crack (WI-6/7); the handler is an exempt by-id federation
-// surface today and has no production caller here yet.
+// RunDetail is the typed order-history projection: a decoded run, its original
+// labels, and any captured exec-gate output.
 type RunDetail struct {
 	// Run is the decoded order run.
 	Run OrderRun
+	// Labels are the bead labels exposed by the history API.
+	Labels []string
 	// Gate is the run's captured exec-gate output (empty when the run has none).
 	Gate convergence.GateOutput
 }
 
 // RunDetail reads the tracking/run bead named by handle and projects it onto a
-// RunDetail (OrderRun + the run's gate output). The gate-output vocabulary stays
-// owned by internal/convergence; only the typed GateOutput escapes.
+// RunDetail. The gate-output vocabulary stays owned by internal/convergence;
+// only the typed GateOutput escapes.
 func (s *Store) RunDetail(handle string) (RunDetail, error) {
 	if s.store.Store == nil {
 		return RunDetail{}, fmt.Errorf("orders run detail %q: nil store", handle)
@@ -77,9 +75,42 @@ func (s *Store) RunDetail(handle string) (RunDetail, error) {
 	}
 	name, _ := NameFromTrackingBead(b)
 	return RunDetail{
-		Run:  decodeRun(name, b),
-		Gate: convergence.GateOutputFromMetadata(b.Metadata),
+		Run:    decodeRun(name, b),
+		Labels: slices.Clone(b.Labels),
+		Gate:   convergence.GateOutputFromMetadata(b.Metadata),
 	}, nil
+}
+
+// RecentRunDetails lists up to limit history rows for scoped, newest-first,
+// including closed runs and both bead tiers. It reads labels, run state, and
+// captured output in one list query so callers do not issue one Get per row.
+// Returned rows accompany a list error, matching RecentRuns.
+func (s *Store) RecentRunDetails(scoped string, limit int, before time.Time) ([]RunDetail, error) {
+	if s.store.Store == nil {
+		return nil, nil
+	}
+	list, err := s.store.List(beads.ListQuery{
+		Label:         labelOrderRunPrefix + scoped,
+		CreatedBefore: before,
+		Limit:         limit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	details := make([]RunDetail, 0, len(list))
+	for _, b := range list {
+		run, ok := RunFromTrackingBead(b)
+		if !ok {
+			run = decodeRun(scoped, b)
+			run.Outcome = RunOutcomeNone
+		}
+		details = append(details, RunDetail{
+			Run:    run,
+			Labels: slices.Clone(b.Labels),
+			Gate:   convergence.GateOutputFromMetadata(b.Metadata),
+		})
+	}
+	return details, err
 }
 
 // RecentRunsAll lists up to limit tracking beads across EVERY order (newest-first,

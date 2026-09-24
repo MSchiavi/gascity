@@ -4976,6 +4976,8 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 		},
 	}
 
+	// TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs owns the exact
+	// runtime deadline with virtual time; this case covers real provider cleanup.
 	var stderr bytes.Buffer
 	err := stopManagedCity(mc, cityPath, &stderr)
 	if err == nil {

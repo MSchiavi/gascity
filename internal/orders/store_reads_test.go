@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -431,5 +432,103 @@ func TestClosedRunsForRetentionBestEffortName(t *testing.T) {
 	}
 	if len(runs) != 2 {
 		t.Fatalf("ClosedRunsForRetention() returned %d runs, want 2 (including the unresolvable-name bead)", len(runs))
+	}
+}
+
+// runDetailsSpyStore checks that a history projection uses one bounded List
+// and does not hydrate each result with a separate Get.
+type runDetailsSpyStore struct {
+	beads.Store
+	queries  []beads.ListQuery
+	gets     int
+	rows     []beads.Bead
+	listErr  error
+	scripted bool
+}
+
+func (s *runDetailsSpyStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, q)
+	if s.scripted {
+		return s.rows, s.listErr
+	}
+	return s.Store.List(q)
+}
+
+func (s *runDetailsSpyStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+func TestRecentRunDetailsProjectsHistoryInOneBoundedRead(t *testing.T) {
+	mem := beads.NewMemStore()
+	labels := []string{"order-run:digest", "exec-failed", "legacy"}
+	created, err := mem.Create(beads.Bead{
+		Title:  "legacy digest run",
+		Status: "closed",
+		Labels: labels,
+		Metadata: map[string]string{
+			convergence.FieldGateDurationMs: "42",
+			convergence.FieldGateExitCode:   "7",
+			convergence.FieldGateStdout:     "visible in detail",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	spy := &runDetailsSpyStore{Store: mem}
+	before := created.CreatedAt.Add(time.Second)
+	details, err := NewStore(beads.OrdersStore{Store: spy}).RecentRunDetails("digest", 2, before)
+	if err != nil {
+		t.Fatalf("RecentRunDetails: %v", err)
+	}
+	if len(details) != 1 {
+		t.Fatalf("details = %+v, want one legacy order-run row", details)
+	}
+	got := details[0]
+	if got.Run.ID != created.ID || got.Run.Scoped != "digest" || got.Run.Outcome != RunOutcomeExecFailed || got.Run.Open {
+		t.Fatalf("run = %+v, want the closed failed legacy run", got.Run)
+	}
+	if !reflect.DeepEqual(got.Labels, labels) {
+		t.Fatalf("labels = %v, want %v", got.Labels, labels)
+	}
+	if got.Gate.DurationMs != "42" || got.Gate.ExitCode != "7" || got.Gate.CombinedOutput() != "visible in detail" {
+		t.Fatalf("gate = %+v, want captured duration, exit code, and output", got.Gate)
+	}
+	if len(spy.queries) != 1 || spy.gets != 0 {
+		t.Fatalf("List calls = %d, Get calls = %d; want one list and no per-row Get", len(spy.queries), spy.gets)
+	}
+	q := spy.queries[0]
+	if q.Label != "order-run:digest" || q.Limit != 2 || !q.CreatedBefore.Equal(before) ||
+		!q.IncludeClosed || q.Sort != beads.SortCreatedDesc || q.TierMode != beads.TierBoth ||
+		q.AllowBackingCreatedLimit {
+		t.Fatalf("List query = %+v, want scoped, bounded, before, closed, newest, both tiers", q)
+	}
+}
+
+func TestRecentRunDetailsKeepsRowsAlongsideListError(t *testing.T) {
+	listErr := errors.New("issues tier unavailable")
+	spy := &runDetailsSpyStore{
+		Store:    beads.NewMemStore(),
+		scripted: true,
+		rows: []beads.Bead{{
+			ID:        "legacy-row",
+			Labels:    []string{"order-tracking"},
+			CreatedAt: time.Now(),
+		}},
+		listErr: listErr,
+	}
+	details, err := NewStore(beads.OrdersStore{Store: spy}).RecentRunDetails("digest", 1, time.Time{})
+	if !errors.Is(err, listErr) {
+		t.Fatalf("RecentRunDetails error = %v, want list error", err)
+	}
+	if len(details) != 1 || details[0].Run.ID != "legacy-row" || details[0].Run.Scoped != "digest" ||
+		details[0].Run.Outcome != RunOutcomeNone || !reflect.DeepEqual(details[0].Labels, []string{"order-tracking"}) {
+		t.Fatalf("details = %+v, want retained malformed row with empty outcome", details)
+	}
+	if len(spy.queries) != 1 || spy.gets != 0 {
+		t.Fatalf("List calls = %d, Get calls = %d; want one list and no Get", len(spy.queries), spy.gets)
 	}
 }
