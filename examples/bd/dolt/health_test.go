@@ -2450,7 +2450,13 @@ func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
 	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	ahead := time.Now().Add(5 * time.Second)
+	// The offset must survive scheduling delays between Chtimes and the
+	// health script's `now`: every second past the buffer becomes a second
+	// of positive age and fails the exact-0 assertion below. 5s flaked
+	// under gate load (gcy-cjo: dolt_age_sec=4 at loadavg 13+); 10m keeps
+	// the mtime in the future through any plausible stall while staying
+	// far below the 12h stale threshold.
+	ahead := time.Now().Add(10 * time.Minute)
 	if err := os.Chtimes(manifest, ahead, ahead); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
