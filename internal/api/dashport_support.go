@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/dashboardbff"
@@ -96,10 +97,11 @@ type SeededCityDeps struct {
 // "/" and let its relative fetches resolve to the same origin.
 //
 // The plane's per-city run tailers and status samplers are started against ctx.
-// The returned stop function invokes the plane's Stop, which cancels those
-// goroutines and synchronously waits for them to drain; cancelling ctx alone
-// stops them but does not wait, so call stop (e.g. via the harness's t.Cleanup,
-// after the server is closed) for a deterministic teardown. baseURL is the
+// Canceling ctx also stops active typed SSE streams, but does not wait for the
+// plane's goroutines to drain. The returned idempotent stop function stops SSE
+// streams and invokes the plane's Stop, which waits for its goroutines. When
+// using an externally owned http.Server, cancel ctx or call stop before
+// http.Server.Shutdown so open SSE responses can finish. baseURL is the
 // loopback origin the host-side status samplers dial to read this stack's own
 // /v0 status; pass the httptest.Server URL once known, or "" to leave the
 // status samplers dark (the run tailers, which read the event log off disk, do
@@ -133,7 +135,18 @@ func ServeSeededCity(ctx context.Context, deps SeededCityDeps, baseURL string) (
 	plane.Start(ctx)
 	mux.WithRunCensusSource(plane).WithAPIPlane(plane.Handler()).WithStaticHandler(spa)
 
-	return mux.Handler(), plane.Stop, nil
+	parentStop := context.AfterFunc(ctx, func() {
+		mux.stopSSEStreams()
+	})
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			parentStop()
+			mux.stopSSEStreams()
+			plane.Stop()
+		})
+	}
+	return mux.Handler(), stop, nil
 }
 
 // singleCityPathResolver resolves exactly one city name to its seeded root path

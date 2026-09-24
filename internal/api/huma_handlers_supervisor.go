@@ -241,7 +241,7 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 			schemaSample:  typedTaggedEventStreamEnvelopeSchema{},
 		},
 		"heartbeat": HeartbeatEvent{},
-	}, sm.precheckGlobalEventStream, sm.streamGlobalEvents)
+	}, sm.precheckGlobalEventStream, sm.sseStreams, sm.streamGlobalEvents)
 }
 
 // --- Supervisor Huma handlers ---
