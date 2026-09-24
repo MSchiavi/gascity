@@ -31,6 +31,8 @@ type harness struct {
 	cityName string
 	cityPath string
 	client   *http.Client
+	cancel   context.CancelFunc
+	stop     func()
 }
 
 // newHarness seeds a city from testdata/dashport and serves the full supervisor
@@ -68,6 +70,8 @@ func newHarness(t *testing.T) *harness {
 		cityName: fx.CityName,
 		cityPath: fx.CityPath,
 		client:   srv.Client(),
+		cancel:   cancel,
+		stop:     stop,
 	}
 }
 

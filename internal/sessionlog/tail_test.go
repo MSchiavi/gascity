@@ -2,10 +2,56 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestReadTailWindowAtRespectsSnapshotAndWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte("older\nfresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("close session file: %v", err)
+		}
+	})
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("appended\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name          string
+		window        int64
+		want          string
+		startsMidLine bool
+		truncated     bool
+	}{
+		{name: "full snapshot", window: size, want: "older\nfresh\n"},
+		{name: "line boundary", window: 6, want: "fresh\n", truncated: true},
+		{name: "capped mid-line", window: 4, want: "esh\n", startsMidLine: true, truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, startsMidLine, truncated, err := readTailWindowAt(f, size, tc.window)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != tc.want || startsMidLine != tc.startsMidLine || truncated != tc.truncated {
+				t.Fatalf("readTailWindowAt = (%q, %t, %t), want (%q, %t, %t)", data, startsMidLine, truncated, tc.want, tc.startsMidLine, tc.truncated)
+			}
+		})
+	}
+}
 
 func TestExtractTailMetaBasic(t *testing.T) {
 	dir := t.TempDir()

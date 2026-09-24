@@ -120,6 +120,7 @@ type SupervisorMux struct {
 	dashboardBase   func() string
 	runCensusSource RunCensusSource
 	server          *http.Server
+	sseStreams      *sseStreamRegistry
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -163,6 +164,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
 		idem:        newIdempotencyCache(30 * time.Minute),
+		sseStreams:  newSSEStreamRegistry(),
 	}
 	sm.registerSupervisorRoutes()
 	sm.registerCityRoutes()
@@ -414,7 +416,14 @@ func (sm *SupervisorMux) Serve(lis net.Listener) error {
 
 // Shutdown gracefully shuts down the server.
 func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
-	return sm.server.Shutdown(ctx)
+	streamErr := sm.stopSSEStreams()
+	return errors.Join(streamErr, sm.server.Shutdown(ctx))
+}
+
+// stopSSEStreams stops only typed SSE responses. The seeded dashboard harness
+// uses this before shutting down its externally-owned HTTP server.
+func (sm *SupervisorMux) stopSSEStreams() error {
+	return sm.sseStreams.stop()
 }
 
 // ServeHTTP delegates every request to humaMux. Every typed

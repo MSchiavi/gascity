@@ -120,6 +120,7 @@ func registerSSE[I any](
 	op huma.Operation,
 	eventTypeMap map[string]any,
 	precheck func(context.Context, *I) error,
+	streams *sseStreamRegistry,
 	stream StreamFunc[I],
 ) {
 	normalizeSSEResponseHeaders(&op)
@@ -133,15 +134,24 @@ func registerSSE[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
+				bodyWriter := hctx.BodyWriter()
+				response, _ := bodyWriter.(http.ResponseWriter)
+				streamCtx, lease, finish := streams.begin(hctx.Context(), response)
+				defer finish()
 				bw, encoder, flusher := beginSSEStream(hctx)
 				send := func(msg sse.Message) error {
+					if err := streamCtx.Err(); err != nil {
+						return err
+					}
 					idLine := ""
 					if msg.ID > 0 {
 						idLine = fmt.Sprintf("id: %d\n", msg.ID)
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				stream(hctx, input, send)
+				streams.invoke(lease, streamCtx, func() {
+					stream(huma.WithContext(hctx, streamCtx), input, send)
+				})
 			},
 		}, nil
 	})
@@ -184,6 +194,7 @@ func registerSSEStringID[I any](
 	op huma.Operation,
 	eventTypeMap map[string]any,
 	precheck func(context.Context, *I) error,
+	streams *sseStreamRegistry,
 	stream StringIDStreamFunc[I],
 ) {
 	normalizeSSEResponseHeaders(&op)
@@ -197,15 +208,24 @@ func registerSSEStringID[I any](
 		}
 		return &huma.StreamResponse{
 			Body: func(hctx huma.Context) {
+				bodyWriter := hctx.BodyWriter()
+				response, _ := bodyWriter.(http.ResponseWriter)
+				streamCtx, lease, finish := streams.begin(hctx.Context(), response)
+				defer finish()
 				bw, encoder, flusher := beginSSEStream(hctx)
 				send := func(msg StringIDMessage) error {
+					if err := streamCtx.Err(); err != nil {
+						return err
+					}
 					idLine := ""
 					if msg.ID != "" {
 						idLine = fmt.Sprintf("id: %s\n", msg.ID)
 					}
 					return writeSSEFrame(bw, encoder, flusher, typeToEvent, idLine, msg.Data)
 				}
-				stream(hctx, input, send)
+				streams.invoke(lease, streamCtx, func() {
+					stream(huma.WithContext(hctx, streamCtx), input, send)
+				})
 			},
 		}, nil
 	})

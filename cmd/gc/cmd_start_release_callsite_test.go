@@ -14,8 +14,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestStartStandalone_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork is
-// the production-call-site control for the ONE-SHOT release call in
+// TestStartStandalone_OrphanReleaseCallSite_RetainsLiveReclaimsBareTemplateResidue
+// is the production-call-site control for the ONE-SHOT release call in
 // doStartStandalone (cmd_start.go) — the second of the two sites, and per the
 // acceptance review the more important one: it is the path that runs when the
 // controller STARTS (a bounce IS a controller start), and it has no follow-up
@@ -28,11 +28,13 @@ import (
 //     bead lives ONLY in the relocated sessions-class binding. LEG D
 //     reachable-red: repoint the call site's sessionStore argument at the
 //     work store and W1 is falsely released.
-//   - W2 (protectedWakeWork cure): bare-template assignee with no session
-//     bead of its own, wake-reachable via a running same-template session.
-//     LEG E reachable-red: drop the preWakeCandidates hunk and W2 is
-//     reopened.
-func TestStartStandalone_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork(t *testing.T) {
+//   - W2 (gcy-bzq reclaim leg): bare-template assignee on a multi-slot pool,
+//     with a live slot session running. No seat of an expanded-identity pool
+//     holds the bare template, so the wake arm cannot serve it and the
+//     one-shot release must reclaim it (assignee cleared, route kept). This
+//     leg formerly pinned wake-protection retention (gc-ft31x Leg E); that
+//     expectation was the spawn/drain wedge.
+func TestStartStandalone_OrphanReleaseCallSite_RetainsLiveReclaimsBareTemplateResidue(t *testing.T) {
 	cityPath := t.TempDir()
 	clearInheritedBeadsEnv(t)
 	t.Chdir(t.TempDir())
@@ -121,7 +123,7 @@ prefix = "rb"
 	// mismatched, so retention falls to the sessionStore liveness probe —
 	// the argument Leg D mutates.
 	w1 := seedWorkIn(rigBStore, "w1: assignee live only in the relocated sessions binding", "rigworker-w1-live", "rigA/rigworker")
-	w2 := seedWorkIn(rigBStore, "w2: staleness-window bare-template assignee", "worker", "worker")
+	w2 := seedWorkIn(rigBStore, "w2: bare-template residue on a multi-slot pool", "worker", "worker")
 	// Keeps the worker-1 session bead owning open work so no sweep closes it
 	// before the release arm needs it for W2's wake reachability.
 	seedWorkIn(rigBStore, "w3: anchors the worker-1 session through sweeps", "worker-1", "worker")
@@ -184,20 +186,24 @@ prefix = "rb"
 	// Bead IDs collide across independent stores (both minted "gc-1"), so each
 	// row carries its own store — the same store-scoped-key lesson
 	// readyAssignedFlagsForBeads documents.
-	for _, tc := range []struct {
-		store              beads.Store
-		id, assignee, cure string
-	}{
-		{rigBStore, w1.ID, "rigworker-w1-live", "sessionStore (one-shot liveness read must hit the relocated sessions class, not the work store)"},
-		{rigBStore, w2.ID, "worker", "protectedWakeWork (one-shot release must not reopen work this run's wake arm serves)"},
-	} {
-		got, err := tc.store.Get(tc.id)
-		if err != nil {
-			t.Fatalf("get %s: %v", tc.id, err)
-		}
-		if got.Assignee != tc.assignee || got.Status != inProgress {
-			t.Errorf("%s was released at the one-shot call site: assignee=%q status=%q, want assignee=%q status=%q — lost cure: %s\nstderr:\n%s",
-				tc.id, got.Assignee, got.Status, tc.assignee, inProgress, tc.cure, stderr.String())
-		}
+	gotW1, err := rigBStore.Get(w1.ID)
+	if err != nil {
+		t.Fatalf("get %s: %v", w1.ID, err)
+	}
+	if gotW1.Assignee != "rigworker-w1-live" || gotW1.Status != inProgress {
+		t.Errorf("%s was released at the one-shot call site: assignee=%q status=%q, want assignee=%q status=%q — lost cure: %s\nstderr:\n%s",
+			w1.ID, gotW1.Assignee, gotW1.Status, "rigworker-w1-live", inProgress,
+			"sessionStore (one-shot liveness read must hit the relocated sessions class, not the work store)", stderr.String())
+	}
+	gotW2, err := rigBStore.Get(w2.ID)
+	if err != nil {
+		t.Fatalf("get %s: %v", w2.ID, err)
+	}
+	if gotW2.Assignee != "" || gotW2.Status != "open" {
+		t.Errorf("%s was NOT reclaimed at the one-shot call site: assignee=%q status=%q, want assignee=%q status=%q — the bare-template residue on an expanded pool must be released back to the pool queue (gcy-bzq)\nstderr:\n%s",
+			w2.ID, gotW2.Assignee, gotW2.Status, "", "open", stderr.String())
+	}
+	if gotW2.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+		t.Errorf("%s lost its route on reclaim: gc.routed_to=%q, want %q", w2.ID, gotW2.Metadata[beadmeta.RoutedToMetadataKey], "worker")
 	}
 }

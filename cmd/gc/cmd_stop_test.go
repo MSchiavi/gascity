@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1012,6 +1013,38 @@ provider = "file"
 		}
 	case <-time.After(time.Second):
 		t.Fatal("controller did not receive stop command")
+	}
+}
+
+func TestCmdStopBodyReportsBeadStoreShutdownFailure(t *testing.T) {
+	for _, controller := range []bool{false, true} {
+		t.Run(fmt.Sprintf("controller=%t", controller), func(t *testing.T) {
+			cityDir := shortSocketTempDir(t, "gc-stop-storage-")
+			writeRigAnywhereCityToml(t, cityDir, "[workspace]\nname = \"storage-stop\"\n[beads]\nprovider = \"file\"\n")
+			if controller {
+				startAcknowledgingStandaloneController(t, cityDir)
+			} else {
+				oldFactory := sessionProviderForStopCity
+				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+					return runtime.NewFake(), nil
+				}
+				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+			}
+			failure := errors.New("poller identity unavailable")
+			overrideShutdownBeadsProviderForStop(t, func(string) error { return failure })
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "storage-stop"},
+				Beads:     config.BeadsConfig{Provider: "file"},
+				Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+			}
+			var stdout, stderr lockedBuffer
+			if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 1 {
+				t.Fatalf("cmdStopBody() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "City stopped.") || !strings.Contains(stderr.String(), failure.Error()) {
+				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

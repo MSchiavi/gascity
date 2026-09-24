@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -28,8 +27,11 @@ type OrderListOutput struct {
 }
 
 // humaHandleOrderList is the Huma-typed handler for GET /v0/orders.
-func (s *Server) humaHandleOrderList(_ context.Context, _ *OrderListInput) (*OrderListOutput, error) {
+func (s *Server) humaHandleOrderList(_ context.Context, input *OrderListInput) (*OrderListOutput, error) {
 	aa := s.state.Orders()
+	if input.IncludeDisabled {
+		aa = s.state.OrdersAll()
+	}
 	resp := make([]orderResponse, len(aa))
 	for i, a := range aa {
 		resp[i] = toOrderResponse(a)
@@ -71,6 +73,19 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 	aa := s.state.Orders()
 
 	ep := s.state.EventProvider()
+	stores := make([][]workflowStoreInfo, len(aa))
+	for i, a := range aa {
+		infos, err := orderStoreInfosForState(s.state, a)
+		if err != nil {
+			return nil, apierr.ServiceUnavailable.Msg(err.Error())
+		}
+		for _, info := range infos {
+			if err := cacheLiveOr503(info.store); err != nil {
+				return nil, err
+			}
+		}
+		stores[i] = infos
+	}
 
 	index := s.latestIndex()
 	cacheKey := cacheKeyFor("orders-check", input)
@@ -83,12 +98,12 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 
 	now := time.Now()
 	checks := make([]orderCheckResponse, 0, len(aa))
-	for _, a := range aa {
-		storeInfos, err := orderStoreInfosForState(s.state, a)
+	for i, a := range aa {
+		storeInfos := stores[i]
+		history, err := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
 		if err != nil {
-			storeInfos = nil
+			return nil, apierr.StoreUnavailable.Msg(fmt.Sprintf("reading order history for %q: %v", a.ScopedName(), err))
 		}
-		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
 		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
@@ -102,7 +117,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			cr.LastRun = &ts
 		}
 		if len(history) > 0 {
-			if run, ok := orders.RunFromTrackingBead(history[0].bead); ok {
+			if run, ok := history[0].run, history[0].hasRun; ok {
 				if outcome := run.Outcome.Display(); outcome != "" {
 					cr.LastRunOutcome = &outcome
 				}
@@ -221,20 +236,22 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	}
 	storeInfos, err := orderStoreInfosForState(s.state, orderDef)
 	if err != nil {
-		if errors.Is(err, errNoOrderStores) {
-			return nil, apierr.ServiceUnavailable.Msg(err.Error())
+		return nil, apierr.ServiceUnavailable.Msg(err.Error())
+	}
+	for _, info := range storeInfos {
+		if err := cacheLiveOr503(info.store); err != nil {
+			return nil, err
 		}
-		return nil, apierr.Internal.Msg(err.Error())
 	}
 
-	results, err := orderHistoryBeadsAcrossStoreInfos(storeInfos, scopedName, limit, beforeTime)
+	results, err := orderHistoryRunDetailsAcrossStoreInfos(storeInfos, scopedName, limit, beforeTime)
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, apierr.StoreUnavailable.Msg(err.Error())
 	}
 
 	entries := make([]orderHistoryEntry, 0, len(results))
 	for _, result := range results {
-		b := result.bead
+		run := result.detail.Run
 		name := scopedName
 		rig := ""
 		if auto != nil {
@@ -246,24 +263,29 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 
 		entry := orderHistoryEntry{
-			BeadID:        b.ID,
+			BeadID:        run.ID,
 			StoreRef:      result.storeRef,
 			Name:          name,
 			ScopedName:    scopedName,
 			Rig:           rig,
-			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
-			Labels:        b.Labels,
+			CreatedAt:     run.CreatedAt.Format(time.RFC3339),
+			Labels:        result.detail.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
+		if outcome := run.Outcome.Display(); outcome != "" {
+			entry.Outcome = &outcome
+		}
 
-		gate := convergence.GateOutputFromMetadata(b.Metadata)
+		gate := result.detail.Gate
 		if gate.DurationMs != "" {
 			entry.DurationMs = &gate.DurationMs
 		}
 		if gate.ExitCode != "" {
 			entry.ExitCode = &gate.ExitCode
 		}
-		entry.HasOutput = entry.CaptureOutput || gate.HasOutput()
+		// CaptureOutput describes the order's capability; HasOutput means the
+		// history detail can actually return stored stdout or stderr.
+		entry.HasOutput = gate.HasOutput()
 
 		entries = append(entries, entry)
 		if len(entries) >= limit {
@@ -289,6 +311,7 @@ type orderHistoryEntry struct {
 	Labels        []string `json:"labels"`
 	DurationMs    *string  `json:"duration_ms,omitempty"`
 	ExitCode      *string  `json:"exit_code,omitempty"`
+	Outcome       *string  `json:"outcome,omitempty"`
 	Signal        *string  `json:"signal,omitempty"`
 	Error         *string  `json:"error,omitempty"`
 	WispRootID    *string  `json:"wisp_root_id,omitempty"`
@@ -301,6 +324,9 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	Body orderHistoryDetailResponse
 }, error,
 ) {
+	if _, err := orderStoreInfosForState(s.state, orders.Order{}); err != nil {
+		return nil, apierr.ServiceUnavailable.Msg(err.Error())
+	}
 	// The bead this reads is an order-tracking bead, which on a split city lives in
 	// the orders binding. workflowStores leads with the GRAPH binding, so without
 	// the orders leg this only finds one because the shape this build serves
@@ -314,7 +340,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 		}
 		storeInfos = []workflowStoreInfo{info}
 	}
-	result, err := orderHistoryBeadAcrossStoreInfos(storeInfos, input.BeadID)
+	result, err := orderHistoryRunDetailAcrossStoreInfos(storeInfos, input.BeadID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.BeadNotFound.Msg("bead not found")
@@ -322,20 +348,18 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 		if errors.Is(err, errNoOrderStores) {
 			return nil, apierr.ServiceUnavailable.Msg(err.Error())
 		}
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, apierr.StoreUnavailable.Msg(err.Error())
 	}
-	b := result.bead
-
-	output := convergence.GateOutputFromMetadata(b.Metadata).CombinedOutput()
+	run := result.detail
 
 	return &struct {
 		Body orderHistoryDetailResponse
 	}{Body: orderHistoryDetailResponse{
-		BeadID:    b.ID,
+		BeadID:    run.Run.ID,
 		StoreRef:  result.storeRef,
-		CreatedAt: b.CreatedAt.Format(time.RFC3339),
-		Labels:    b.Labels,
-		Output:    output,
+		CreatedAt: run.Run.CreatedAt.Format(time.RFC3339),
+		Labels:    run.Labels,
+		Output:    run.Gate.CombinedOutput(),
 	}}, nil
 }
 
@@ -351,36 +375,62 @@ type orderHistoryDetailResponse struct {
 type orderHistoryStoreBead struct {
 	storeRef string
 	bead     beads.Bead
+	run      orders.OrderRun
+	hasRun   bool
+}
+
+type orderHistoryStoreRun struct {
+	storeRef string
+	detail   orders.RunDetail
+}
+
+func orderHistoryRow(storeRef string, bead beads.Bead) orderHistoryStoreBead {
+	run, ok := orders.RunFromTrackingBead(bead)
+	return orderHistoryStoreBead{storeRef: storeRef, bead: bead, run: run, hasRun: ok}
 }
 
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
 	cityName := workflowCityScopeRef(state.CityName())
+	cityStore := state.CityBeadStore()
+	if cityStore == nil {
+		return nil, errors.New("city bead store unavailable")
+	}
+	if state.OrdersBeadStore().Store == nil {
+		return nil, errors.New("orders bead store unavailable")
+	}
 	infos := make([]workflowStoreInfo, 0, 2)
 	if strings.TrimSpace(a.Rig) != "" {
-		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
+		cfg := state.Config()
+		if cfg == nil {
+			return nil, fmt.Errorf("order rig configuration unavailable for %s", a.ScopedName())
+		}
+		for _, rig := range cfg.Rigs {
+			if rig.Name != a.Rig {
+				continue
+			}
+			rigStore := state.BeadStore(a.Rig)
+			if rigStore == nil {
+				return nil, fmt.Errorf("order rig store unavailable for %s", a.ScopedName())
+			}
 			infos = append(infos, workflowStoreInfo{
 				ref:       "rig:" + a.Rig,
 				scopeKind: beadmeta.ScopeKindRig,
 				scopeRef:  a.Rig,
 				store:     rigStore,
 			})
+			break
 		}
 	}
 
-	if cityStore := state.CityBeadStore(); cityStore != nil {
-		infos = append(infos, workflowStoreInfo{
-			ref:       "city:" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     cityStore,
-		})
-	}
+	infos = append(infos, workflowStoreInfo{
+		ref:       "city:" + cityName,
+		scopeKind: beadmeta.ScopeKindCity,
+		scopeRef:  cityName,
+		store:     cityStore,
+	})
 
 	infos = appendOrdersClassStoreInfo(infos, state, cityName)
 
-	if len(infos) == 0 {
-		return nil, errNoOrderStores
-	}
 	return infos, nil
 }
 
@@ -452,7 +502,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 	label := "order-run:" + scopedName
 	seen := make(map[string]bool)
 	results := make([]orderHistoryStoreBead, 0)
-	for i, info := range infos {
+	for _, info := range infos {
 		if info.store == nil {
 			continue
 		}
@@ -478,13 +528,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows, err = info.store.List(query)
 		}
 		if err != nil {
-			if i == 0 && len(rows) == 0 {
-				return nil, err
-			}
-			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			if len(rows) == 0 {
-				continue
-			}
+			return nil, fmt.Errorf("list %s: %w", info.ref, err)
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -495,7 +539,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 				continue
 			}
 			seen[key] = true
-			results = append(results, orderHistoryStoreBead{storeRef: info.ref, bead: row})
+			results = append(results, orderHistoryRow(info.ref, row))
 		}
 	}
 
@@ -516,7 +560,7 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 	label := "order-run:" + scopedName
 	seen := make(map[string]bool)
 	results := make([]orderHistoryStoreBead, 0)
-	for i, info := range infos {
+	for _, info := range infos {
 		if info.store == nil {
 			continue
 		}
@@ -529,13 +573,7 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			if i == 0 && len(rows) == 0 {
-				return nil, err
-			}
-			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			if len(rows) == 0 {
-				continue
-			}
+			return nil, fmt.Errorf("list %s: %w", info.ref, err)
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -546,7 +584,7 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 				continue
 			}
 			seen[key] = true
-			results = append(results, orderHistoryStoreBead{storeRef: info.ref, bead: row})
+			results = append(results, orderHistoryRow(info.ref, row))
 		}
 	}
 
@@ -559,29 +597,62 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 	return results, nil
 }
 
-func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) (orderHistoryStoreBead, error) {
+func orderHistoryRunDetailsAcrossStoreInfos(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time) ([]orderHistoryStoreRun, error) {
 	if len(infos) == 0 {
-		return orderHistoryStoreBead{}, errNoOrderStores
+		return nil, errNoOrderStores
 	}
 
-	var lastErr error
+	seen := make(map[string]bool)
+	results := make([]orderHistoryStoreRun, 0)
 	for _, info := range infos {
 		if info.store == nil {
 			continue
 		}
-		bead, err := info.store.Get(beadID)
+		details, err := orders.NewStore(beads.OrdersStore{Store: info.store}).RecentRunDetails(scopedName, limit, beforeTime)
+		if err != nil {
+			return nil, fmt.Errorf("list %s: %w", info.ref, err)
+		}
+		for _, detail := range details {
+			if !beforeTime.IsZero() && !detail.Run.CreatedAt.Before(beforeTime) {
+				continue
+			}
+			key := info.ref + "\x00" + detail.Run.ID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			results = append(results, orderHistoryStoreRun{storeRef: info.ref, detail: detail})
+		}
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].detail.Run.CreatedAt.After(results[j].detail.Run.CreatedAt)
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func orderHistoryRunDetailAcrossStoreInfos(infos []workflowStoreInfo, beadID string) (orderHistoryStoreRun, error) {
+	if len(infos) == 0 {
+		return orderHistoryStoreRun{}, errNoOrderStores
+	}
+
+	for _, info := range infos {
+		if info.store == nil {
+			continue
+		}
+		detail, err := orders.NewStore(beads.OrdersStore{Store: info.store}).RunDetail(beadID)
 		if err == nil {
-			return orderHistoryStoreBead{storeRef: info.ref, bead: bead}, nil
+			return orderHistoryStoreRun{storeRef: info.ref, detail: detail}, nil
 		}
 		if errors.Is(err, beads.ErrNotFound) {
 			continue
 		}
-		lastErr = err
+		return orderHistoryStoreRun{}, fmt.Errorf("get %s: %w", info.ref, err)
 	}
-	if lastErr != nil {
-		return orderHistoryStoreBead{}, lastErr
-	}
-	return orderHistoryStoreBead{}, beads.ErrNotFound
+	return orderHistoryStoreRun{}, beads.ErrNotFound
 }
 
 // humaHandleOrderEnable is the Huma-typed handler for POST /v0/order/{name}/enable.

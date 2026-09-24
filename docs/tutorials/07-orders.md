@@ -377,6 +377,12 @@ pancakes-check  mc-zbd   2026-04-08T07:31:22Z
 pancakes-check  mc-9p8   2026-04-08T07:26:18Z
 ```
 
+The dashboard's Orders page shows registered orders and their due state. Open
+an order to see recent runs and, for exec orders, view captured stdout and
+stderr. Output is redacted and capped; a run with no stored output has no
+viewer link. History and stored output remain readable when the current order
+definition has been removed, as long as its tracking bead survives.
+
 The tracking bead is created synchronously _before_ the dispatch goroutine
 launches — which is what keeps the cooldown trigger from re-firing on the very
 next tick. The trigger checks for recent tracking beads when deciding if the

@@ -127,7 +127,7 @@ func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error
 	if _, err := r.Seek(offset, io.SeekStart); err != nil {
 		return nil, false, false, err
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, size-offset))
 	if err != nil {
 		return nil, false, false, err
 	}

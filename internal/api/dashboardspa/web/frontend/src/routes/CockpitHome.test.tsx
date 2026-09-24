@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { UsageBody } from 'gas-city-dashboard-shared/gc-supervisor';
 import { MemoryRouter } from 'react-router-dom';
 import type { RunSummarySubscription } from '../runs/runSummarySubscription';
@@ -293,6 +293,7 @@ describe('<CockpitHomePage>', () => {
           wall_seconds: 90,
           cost_usd_estimate: 0.06,
           unpriced: 0,
+          timing_complete: true,
         },
         {
           run: 'gc-b',
@@ -305,8 +306,10 @@ describe('<CockpitHomePage>', () => {
           wall_seconds: 45,
           cost_usd_estimate: 0.09,
           unpriced: 0,
+          timing_complete: true,
         },
       ],
+      today_by_run_total: 2,
     });
 
     render(router(<CockpitHomePage />));
@@ -320,7 +323,202 @@ describe('<CockpitHomePage>', () => {
     expect(screen.getByRole('cell', { name: 'gc-b' })).toBeTruthy();
     expect(screen.getByRole('cell', { name: '1.2K' })).toBeTruthy();
     expect(screen.getByRole('cell', { name: '$0.12' })).toBeTruthy();
-    expect(screen.getByText('aggregate · 2 runs · 2.4K/min · $0.07/min')).toBeTruthy();
+    expect(screen.getByText('aggregate · all 2 runs · 2.4K/min · $0.07/min')).toBeTruthy();
+  });
+
+  it('does not present unknown live wall time as zero when model usage exists', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run: [
+        {
+          run: 'gc-live',
+          invocations: 2,
+          compute_facts: 0,
+          input_tokens: 5000,
+          output_tokens: 1000,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          wall_seconds: 0,
+          cost_usd_estimate: 0.12,
+          unpriced: 0,
+        },
+      ],
+    });
+
+    render(router(<CockpitHomePage />));
+
+    const row = (await screen.findByRole('cell', { name: 'gc-live' })).closest('tr');
+    expect(row).not.toBeNull();
+    expect(
+      within(row as HTMLElement)
+        .getAllByRole('cell')
+        .at(-1)?.textContent,
+    ).toBe('—');
+    expect(screen.getByText(/usage cannot be tied to a completed measured interval/i)).toBeTruthy();
+  });
+
+  it('withholds an aggregate rate when one run has unmeasured wall time', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const measured = {
+      run: 'gc-measured',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 60,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.01,
+      unpriced: 0,
+      timing_complete: true,
+    };
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run: [
+        { ...measured, run: 'gc-unknown', input_tokens: 1000, compute_facts: 0, wall_seconds: 0 },
+        measured,
+      ],
+    });
+    render(router(<CockpitHomePage />));
+
+    expect(
+      await screen.findByText('aggregate · returned 2 runs · full-day scope unknown · — · —'),
+    ).toBeTruthy();
+    expect(screen.queryByText(/1.1K\/min/)).toBeNull();
+  });
+
+  it('withholds per-run rates when model tokens cannot be linked to measured wall time', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run_total: 1,
+      today_by_run: [
+        {
+          run: 'gc-mixed',
+          invocations: 2,
+          compute_facts: 1,
+          input_tokens: 1060,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          wall_seconds: 60,
+          cost_usd_estimate: 0.1,
+          unpriced: 0,
+        },
+      ],
+    });
+    render(router(<CockpitHomePage />));
+
+    const row = (await screen.findByRole('cell', { name: 'gc-mixed' })).closest('tr');
+    expect(row).not.toBeNull();
+    expect(
+      within(row as HTMLElement)
+        .getAllByRole('cell')
+        .slice(1, 3)
+        .map((cell) => cell.textContent),
+    ).toEqual(['—', '—']);
+    expect(within(row as HTMLElement).getByRole('cell', { name: '1.0m' })).toBeTruthy();
+    expect(screen.getByText('aggregate · all 1 run · — · —')).toBeTruthy();
+  });
+
+  it('labels a capped run set and a legacy set without known scope', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const row = {
+      run: 'gc-run',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 60,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.01,
+      unpriced: 0,
+      timing_complete: true,
+    };
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      today_by_run_total: 25,
+      today_by_run: Array.from({ length: 24 }, (_, i) => ({ ...row, run: `gc-${i}` })),
+    });
+    const capped = render(router(<CockpitHomePage />));
+    expect(
+      await screen.findByText('aggregate · top 24 of 25 runs · 60/min · $0.01/min'),
+    ).toBeTruthy();
+    capped.unmount();
+
+    mocks.cityUsage.mockResolvedValue({ ...usage, today_by_run: [row] });
+    render(router(<CockpitHomePage />));
+    expect(
+      await screen.findByText(
+        'aggregate · returned 1 run · full-day scope unknown · 60/min · $0.01/min',
+      ),
+    ).toBeTruthy();
+  });
+
+  it('withholds aggregate rates for partial or stale usage readings', async () => {
+    const usage = (await mocks.cityUsage()) as UsageBody;
+    const measured = {
+      run: 'gc-measured',
+      invocations: 1,
+      compute_facts: 1,
+      input_tokens: 60,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      wall_seconds: 60,
+      cost_usd_estimate: 0.01,
+      unpriced: 0,
+      timing_complete: true,
+    };
+    mocks.cityUsage.mockResolvedValue({
+      ...usage,
+      partial: true,
+      partial_reasons: ['rig unavailable'],
+      today_by_run: [measured],
+    });
+    const partial = render(router(<CockpitHomePage />));
+    expect(
+      await screen.findByText('aggregate · returned 1 run · full-day scope unknown · — · —'),
+    ).toBeTruthy();
+    let row = screen.getByRole('cell', { name: 'gc-measured' }).closest('tr');
+    expect(
+      within(row as HTMLElement)
+        .getAllByRole('cell')
+        .slice(1, 3)
+        .map((cell) => cell.textContent),
+    ).toEqual(['—', '—']);
+    expect(screen.getByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
+    partial.unmount();
+
+    mocks.cityUsage.mockResolvedValue({ ...usage, partial: false, today_by_run: [measured] });
+    const fresh = render(router(<CockpitHomePage />));
+    expect(
+      await screen.findByText(
+        'aggregate · returned 1 run · full-day scope unknown · 60/min · $0.01/min',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'tokens / min: 120' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: $6.00' })).toBeTruthy();
+    fresh.unmount();
+
+    mocks.cityUsage.mockRejectedValue(new Error('usage refresh failed'));
+    render(router(<CockpitHomePage />));
+    expect(
+      await screen.findByText('aggregate · returned 1 run · full-day scope unknown · — · —'),
+    ).toBeTruthy();
+    row = screen.getByRole('cell', { name: 'gc-measured' }).closest('tr');
+    expect(
+      within(row as HTMLElement)
+        .getAllByRole('cell')
+        .slice(1, 3)
+        .map((cell) => cell.textContent),
+    ).toEqual(['—', '—']);
+    expect(screen.getByRole('link', { name: 'tokens / min: unavailable' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'burn · $ / hr: unavailable' })).toBeTruthy();
+    expect(screen.getAllByText('usage is stale · refresh failed').length).toBeGreaterThan(0);
   });
 
   it('marks run rates unavailable when the server predates the per-run field', async () => {

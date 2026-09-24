@@ -3,15 +3,18 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -35,6 +38,47 @@ func TestHandleOrderList_Empty(t *testing.T) {
 	}
 	if len(resp.Orders) != 0 {
 		t.Errorf("len(orders) = %d, want 0", len(resp.Orders))
+	}
+}
+
+func TestHandleOrderListIncludesDisabledOnlyWhenRequested(t *testing.T) {
+	fs := newFakeState(t)
+	enabled := true
+	disabled := false
+	fs.autos = []orders.Order{{Name: "active", Enabled: &enabled}}
+	fs.allOrders = []orders.Order{
+		{Name: "active", Enabled: &enabled},
+		{Name: "paused", Enabled: &disabled},
+	}
+	h := newTestCityHandler(t, fs)
+	for _, tc := range []struct {
+		query string
+		want  []string
+	}{
+		{query: "", want: []string{"active"}},
+		{query: "?include_disabled=true", want: []string{"active", "paused"}},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders")+tc.query, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+			}
+			var resp struct {
+				Orders []orderResponse `json:"orders"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.Orders) != len(tc.want) {
+				t.Fatalf("orders = %+v, want %v", resp.Orders, tc.want)
+			}
+			for i, name := range tc.want {
+				if resp.Orders[i].Name != name || resp.Orders[i].Enabled != (name == "active") {
+					t.Fatalf("orders[%d] = %+v, want %q enabled=%t", i, resp.Orders[i], name, name == "active")
+				}
+			}
+		})
 	}
 }
 
@@ -541,6 +585,7 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 
 func TestHandleOrderCheckRunsConditionByDefault(t *testing.T) {
 	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
 	marker := t.TempDir() + "/condition-ran"
 	fs.autos = []orders.Order{
 		{Name: "router", Formula: "review-pr", Trigger: "condition", Check: "printf x >> " + strconv.Quote(marker)},
@@ -1042,9 +1087,10 @@ func TestHandleOrderCheckFallsBackToLiveHistoryWhenCacheUnavailable(t *testing.T
 	}
 }
 
-func TestHandleOrderCheckSkipsUnavailableRigStore(t *testing.T) {
+func TestHandleOrderCheckRejectsUnavailableRigStore(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
+	fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "missing"})
 	delete(fs.stores, "missing")
 	fs.autos = []orders.Order{
 		{Name: "city-review", Formula: "mol-adopt-pr-v2", Trigger: "manual"},
@@ -1056,18 +1102,61 @@ func TestHandleOrderCheckSkipsUnavailableRigStore(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
 	}
+}
 
+func TestHandleOrderCheckRejectsPartialHistoryReads(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		for _, failedStore := range []string{"rig", "city", "orders"} {
+			t.Run(fmt.Sprintf("fresh=%t/%s", fresh, failedStore), func(t *testing.T) {
+				fs := newFakeState(t)
+				fs.cityBeadStore = beads.NewMemStore()
+				fs.ordersBeadStore = beads.NewMemStore()
+				fs.autos = []orders.Order{{Name: "nightly-review", Rig: "myrig", Trigger: "cooldown", Interval: "24h"}}
+				switch failedStore {
+				case "rig":
+					fs.stores["myrig"] = failListStore{Store: fs.stores["myrig"]}
+				case "city":
+					fs.cityBeadStore = failListStore{Store: fs.cityBeadStore}
+				case "orders":
+					fs.ordersBeadStore = failListStore{Store: fs.ordersBeadStore}
+				}
+				path := "/orders/check"
+				if fresh {
+					path += "?fresh=true"
+				}
+				w := httptest.NewRecorder()
+				newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, path), nil))
+				if w.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+				}
+				if strings.Contains(w.Body.String(), "\"checks\"") {
+					t.Fatalf("partial checks returned after %s store failure: %s", failedStore, w.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestHandleOrderCheckEmptyHistoryIsComplete(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{{Name: "nightly-review", Trigger: "cooldown", Interval: "24h"}}
+	w := httptest.NewRecorder()
+	newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
 	var resp struct {
 		Checks []orderCheckResponse `json:"checks"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+		t.Fatal(err)
 	}
-	if len(resp.Checks) != 2 {
-		t.Fatalf("len(checks) = %d, want 2", len(resp.Checks))
+	if len(resp.Checks) != 1 || !resp.Checks[0].Due || resp.Checks[0].LastRun != nil {
+		t.Fatalf("empty history check = %+v, want due with no last run", resp.Checks)
 	}
 }
 
@@ -1124,6 +1213,119 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 }
 
+type partialOrderHistoryStore struct {
+	beads.Store
+	rows []beads.Bead
+}
+
+func (s partialOrderHistoryStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.rows, fmt.Errorf("history read failed")
+}
+
+func TestHandleOrderHistoryRejectsPartialStoreReads(t *testing.T) {
+	for _, failedStore := range []string{"rig", "city", "orders", "rows-plus-error"} {
+		t.Run(failedStore, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cityBeadStore = beads.NewMemStore()
+			fs.ordersBeadStore = beads.NewMemStore()
+			fs.autos = []orders.Order{{Name: "nightly-review", Rig: "myrig", Formula: "mol-review"}}
+			if _, err := fs.stores["myrig"].Create(beads.Bead{
+				Title:  "nightly-review tracking",
+				Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			switch failedStore {
+			case "rig":
+				fs.stores["myrig"] = failListStore{Store: fs.stores["myrig"]}
+			case "city":
+				fs.cityBeadStore = failListStore{Store: fs.cityBeadStore}
+			case "orders":
+				fs.ordersBeadStore = failListStore{Store: fs.ordersBeadStore}
+			case "rows-plus-error":
+				fs.ordersBeadStore = partialOrderHistoryStore{
+					Store: fs.ordersBeadStore,
+					rows:  []beads.Bead{{ID: "partial-run", Labels: []string{"order-run:nightly-review:rig:myrig"}, CreatedAt: time.Now()}},
+				}
+			}
+			w := httptest.NewRecorder()
+			newTestCityHandler(t, fs).ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "store-unavailable") || strings.Contains(w.Body.String(), "\"entries\"") {
+				t.Fatalf("partial %s read returned complete-looking history: %s", failedStore, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleOrderHistoryProjectsStoredOutcomesWithoutOutput(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{{Name: "nightly-review", Exec: "scripts/nightly.sh"}}
+	wants := []struct {
+		labels  []string
+		outcome string
+	}{
+		{labels: []string{"exec"}, outcome: "success"},
+		{labels: []string{"exec-failed"}, outcome: "failed"},
+		{labels: nil, outcome: ""},
+	}
+	byID := make(map[string]string, len(wants))
+	for _, want := range wants {
+		b, err := fs.cityBeadStore.Create(beads.Bead{
+			Title:    "nightly-review tracking",
+			Labels:   append([]string{"order-run:nightly-review"}, want.labels...),
+			Metadata: map[string]string{"convergence.gate_stdout": "private output"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID[b.ID] = want.outcome
+	}
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "private output") {
+		t.Fatalf("history leaked stored output: %s", w.Body.String())
+	}
+	var resp struct {
+		Entries []struct {
+			BeadID     string  `json:"bead_id"`
+			StoreRef   string  `json:"store_ref"`
+			ScopedName string  `json:"scoped_name"`
+			Outcome    *string `json:"outcome"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Entries) != len(wants) {
+		t.Fatalf("entries = %+v", resp.Entries)
+	}
+	for _, entry := range resp.Entries {
+		want, ok := byID[entry.BeadID]
+		if !ok {
+			t.Fatalf("unexpected bead %q", entry.BeadID)
+		}
+		if entry.StoreRef != "city:test-city" || entry.ScopedName != "nightly-review" {
+			t.Fatalf("wrong history identity: %+v", entry)
+		}
+		if want == "" {
+			if entry.Outcome != nil {
+				t.Fatalf("unrecorded outcome = %q", *entry.Outcome)
+			}
+		} else if entry.Outcome == nil || *entry.Outcome != want {
+			t.Fatalf("outcome for %q = %v, want %q", entry.BeadID, entry.Outcome, want)
+		}
+	}
+}
+
 func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
@@ -1166,8 +1368,8 @@ func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
 	if resp.Entries[0].BeadID != run.ID {
 		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
 	}
-	if !resp.Entries[0].CaptureOutput || !resp.Entries[0].HasOutput {
-		t.Fatalf("entry = %+v, want disabled exec order output metadata", resp.Entries[0])
+	if !resp.Entries[0].CaptureOutput || resp.Entries[0].HasOutput {
+		t.Fatalf("entry = %+v, want capture capability but no stored output", resp.Entries[0])
 	}
 }
 

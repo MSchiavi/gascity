@@ -5161,6 +5161,34 @@ func emitSessionStrandedDiagnostic(
 	clk clock.Clock,
 	stderr io.Writer,
 ) sessionpkg.MetadataPatch {
+	return emitSessionStrandedDiagnosticWithProbe(
+		cityPath,
+		cfg,
+		store,
+		rigStores,
+		info,
+		snapshot,
+		template,
+		rec,
+		clk,
+		stderr,
+		probeDetachedWork,
+	)
+}
+
+func emitSessionStrandedDiagnosticWithProbe(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	snapshot *sessionBeadSnapshot,
+	template string,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+	probe func(context.Context, string) detachedProbeResult,
+) sessionpkg.MetadataPatch {
 	if rec == nil {
 		return nil
 	}
@@ -5171,7 +5199,7 @@ func emitSessionStrandedDiagnostic(
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", info.SessionNameMetadata, err) //nolint:errcheck
 	}
-	diagnosticWork := filterDetachedStrandedDiagnosticWork(assignedWork)
+	diagnosticWork := filterDetachedStrandedDiagnosticWork(assignedWork, probe)
 	if err == nil && len(assignedWork) > 0 && len(diagnosticWork) == 0 {
 		return nil
 	}
@@ -5350,7 +5378,10 @@ type strandedAssignedWork struct {
 	store beads.Store
 }
 
-func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
+func filterDetachedStrandedDiagnosticWork(
+	work []strandedAssignedWork,
+	probe func(context.Context, string) detachedProbeResult,
+) []strandedAssignedWork {
 	if len(work) == 0 {
 		return work
 	}
@@ -5361,7 +5392,7 @@ func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strande
 			out = append(out, item)
 			continue
 		}
-		result := probeDetachedWork(context.Background(), spec)
+		result := probe(context.Background(), spec)
 		switch result.Status {
 		case detachedProbeAlive:
 			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)

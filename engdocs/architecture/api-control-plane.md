@@ -244,6 +244,17 @@ New SSE endpoints must register through `registerSSE` /
 `registerSSEStringID`; ad-hoc SSE handlers outside those helpers
 are not covered by this carve-out.
 
+The same helpers own typed-stream shutdown. `SupervisorMux.Shutdown`
+cancels active typed SSE request contexts and sets one shared write deadline
+one second in the future before draining the HTTP server. Senders do not start
+new frames after cancellation, so an in-progress frame gets that grace to
+finish. The deadline is cleared when the handler returns, before `net/http`
+finalizes the response; ordinary requests keep their request contexts and
+drain normally. This is a shutdown-only bound, not a guarantee for arbitrarily
+slow clients. For the integration-only `ServeSeededCity` harness, see its API
+comment in `internal/api/dashport_support.go` for caller-owned server shutdown
+ordering.
+
 Edge cases that are NOT wire and therefore exempt:
 
 - SQL/BLOB (de)serialization in storage packages.

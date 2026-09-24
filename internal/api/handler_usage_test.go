@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,6 +167,12 @@ func TestBuildUsageBodyGroupsTodayByRun(t *testing.T) {
 	if first.WallSeconds != 120 || first.ComputeFacts != 1 {
 		t.Fatalf("r-a compute totals = %+v, want wall=120 facts=1", first)
 	}
+	if first.TimingComplete || second.TimingComplete {
+		t.Fatalf("model and compute facts have no interval join key: %+v", body.TodayByRun)
+	}
+	if body.TodayByRunTotal != 2 {
+		t.Fatalf("today_by_run_total = %d, want 2", body.TodayByRunTotal)
+	}
 	if first.CostUSDEstimate != 0.06 || first.Unpriced != 1 {
 		t.Fatalf("r-a pricing = cost %v unpriced %d, want 0.06/1", first.CostUSDEstimate, first.Unpriced)
 	}
@@ -174,6 +181,46 @@ func TestBuildUsageBodyGroupsTodayByRun(t *testing.T) {
 	}
 	if second.Invocations != 1 || second.WallSeconds != 60 || second.CostUSDEstimate != 0.03 {
 		t.Fatalf("r-b = %+v, want invocations=1 wall=60 cost=0.03", second)
+	}
+}
+
+func TestBuildUsageBodyDoesNotInferTimingFromMixedIntervalsOrFactCounts(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	facts := []usage.Fact{
+		{Kind: usage.KindModel, RunID: "mixed", InputTokens: 60, At: now.Add(-time.Hour).UnixMilli()},
+		{Kind: usage.KindCompute, RunID: "mixed", WallSeconds: 60, At: now.Add(-time.Minute).UnixMilli()},
+		{Kind: usage.KindModel, RunID: "mixed", InputTokens: 1000, At: now.UnixMilli()},
+		{Kind: usage.KindModel, RunID: "equal-count", InputTokens: 100, At: now.Add(-time.Minute).UnixMilli()},
+		{Kind: usage.KindCompute, RunID: "equal-count", WallSeconds: 60, At: now.UnixMilli()},
+		{Kind: usage.KindModel, RunID: "model-only", InputTokens: 100, At: now.UnixMilli()},
+		{Kind: usage.KindCompute, RunID: "compute-only", WallSeconds: 60, At: now.UnixMilli()},
+	}
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	for _, row := range body.TodayByRun {
+		if row.TimingComplete {
+			t.Fatalf("timing completeness for %s = %t", row.Run, row.TimingComplete)
+		}
+	}
+	if body.TodayByRunTotal != 4 {
+		t.Fatalf("today_by_run_total = %d, want 4", body.TodayByRunTotal)
+	}
+}
+
+func TestBuildUsageBodyReportsRunCountBeforeCap(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	facts := make([]usage.Fact, usageByRunCap+1)
+	for i := range facts {
+		facts[i] = usage.Fact{
+			Kind: usage.KindModel, RunID: fmt.Sprintf("run-%02d", i),
+			InputTokens: i + 1, At: now.UnixMilli(),
+		}
+	}
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	if len(body.TodayByRun) != usageByRunCap || body.TodayByRunTotal != usageByRunCap+1 {
+		t.Fatalf("capped rows = %d of %d", len(body.TodayByRun), body.TodayByRunTotal)
+	}
+	if body.TodayByRun[0].Run != "run-24" || body.TodayByRun[len(body.TodayByRun)-1].Run != "run-01" {
+		t.Fatalf("unexpected returned scope: first=%s last=%s", body.TodayByRun[0].Run, body.TodayByRun[len(body.TodayByRun)-1].Run)
 	}
 }
 

@@ -71,6 +71,7 @@ type UsageRunToday struct {
 	WallSeconds         float64 `json:"wall_seconds" doc:"Compute wall-clock seconds for the run today; the per-run rate basis."`
 	CostUSDEstimate     float64 `json:"cost_usd_estimate" doc:"List-price estimate for the run today."`
 	Unpriced            int     `json:"unpriced" doc:"Facts for the run whose price is unknown."`
+	TimingComplete      bool    `json:"timing_complete,omitempty" doc:"True only when all contributing usage has a proven completed wall-clock interval; absent or false means derived rates are unavailable."`
 }
 
 // UsageSource identifies whether the response reflects the local estimate log.
@@ -98,6 +99,7 @@ type UsageBody struct {
 	Recent           UsageTotals          `json:"recent" doc:"Usage in the trailing recent window."`
 	RecentBySession  []UsageSessionRecent `json:"recent_by_session,omitempty" doc:"Recent model usage per session, largest token volume first."`
 	TodayByRun       []UsageRunToday      `json:"today_by_run,omitempty" doc:"Per-run usage since local midnight, largest token volume first, capped. Omitted by servers or proxies that predate the field."`
+	TodayByRunTotal  int                  `json:"today_by_run_total,omitempty" doc:"Number of observed run groups before the today_by_run cap; absent on older servers."`
 	RecentWindowSecs int                  `json:"recent_window_secs" doc:"Length of the recent window in seconds."`
 	ObservedFrom     string               `json:"observed_from,omitempty" doc:"RFC3339 timestamp of the oldest fact included in this bounded read."`
 	UpdatedAt        string               `json:"updated_at" doc:"RFC3339 time at which the aggregate was built."`
@@ -136,6 +138,7 @@ func usageResponse(body UsageBody, aggregateOnly bool) UsageBody {
 	if aggregateOnly {
 		body.RecentBySession = nil
 		body.TodayByRun = nil
+		body.TodayByRunTotal = 0
 	}
 	return body
 }
@@ -284,6 +287,7 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 			Unpriced:            acc.totals.Unpriced,
 		})
 	}
+	body.TodayByRunTotal = len(body.TodayByRun)
 	slices.SortFunc(body.TodayByRun, func(a, b UsageRunToday) int {
 		aTokens := tokenVolume(a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheCreationTokens)
 		bTokens := tokenVolume(b.InputTokens, b.OutputTokens, b.CacheReadTokens, b.CacheCreationTokens)

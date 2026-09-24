@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -65,6 +66,17 @@ type execLabelUpdateFailStore struct {
 
 type eventCursorUpdateFailStore struct {
 	beads.Store
+}
+
+type outputMetadataFailStore struct {
+	beads.Store
+}
+
+func (s outputMetadataFailStore) SetMetadata(id, key, value string) error {
+	if key == convergence.FieldGateStdout {
+		return errors.New("output metadata unavailable")
+	}
+	return s.Store.SetMetadata(id, key, value)
 }
 
 type latestSeqFailProvider struct {
@@ -10668,6 +10680,66 @@ func TestOrderDispatchExecFailureEventCarriesTheCommandsOutput(t *testing.T) {
 	// The exit status still has to survive alongside it.
 	if !strings.Contains(msg, "exit status 1") {
 		t.Fatalf("order.failed lost the exit status; message = %q", msg)
+	}
+	runs := trackingBeads(t, store, "order-run:sweep")
+	if len(runs) != 1 || !strings.Contains(runs[0].Metadata[convergence.FieldGateStdout], diagnostic) {
+		t.Fatalf("failed exec output not stored on tracking bead: %+v", runs)
+	}
+}
+
+func TestOrderDispatchExecPersistsRedactedBoundedSuccessOutput(t *testing.T) {
+	const secret = "ghp_persistedOutputSecret0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	m := &memoryOrderDispatcher{
+		aa:      []orders.Order{{Name: "output", Trigger: "cooldown", Interval: "1m", Exec: "unused"}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			return []byte(secret + "\n" + strings.Repeat("x", convergence.MaxOutputBytes)), nil
+		},
+		rec:    &rec,
+		stderr: &stderr,
+		cfg:    &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+	runs := trackingBeads(t, store, "order-run:output")
+	if len(runs) != 1 {
+		t.Fatalf("tracking runs = %d, want 1; stderr = %q", len(runs), stderr.String())
+	}
+	stored := runs[0].Metadata[convergence.FieldGateStdout]
+	if stored == "" || strings.Contains(stored, secret) || len(stored) > convergence.MaxOutputBytes {
+		t.Fatalf("stored output is empty, unredacted, or unbounded: len=%d output=%q", len(stored), stored)
+	}
+	if !strings.HasSuffix(stored, "[output truncated]") {
+		t.Fatalf("stored output does not disclose truncation: %q", stored)
+	}
+}
+
+func TestOrderDispatchOutputPersistenceFailureKeepsExecOutcome(t *testing.T) {
+	store := outputMetadataFailStore{Store: beads.NewMemStore()}
+	var rec memRecorder
+	var stderr bytes.Buffer
+	m := &memoryOrderDispatcher{
+		aa:      []orders.Order{{Name: "output", Trigger: "cooldown", Interval: "1m", Exec: "unused"}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			return []byte("completed"), nil
+		},
+		rec:    &rec,
+		stderr: &stderr,
+		cfg:    &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+	runs := trackingBeads(t, store, "order-run:output")
+	if len(runs) != 1 || !slicesContain(runs[0].Labels, "exec") || slicesContain(runs[0].Labels, "exec-failed") {
+		t.Fatalf("successful side effect mislabeled after output write failure: %+v", runs)
+	}
+	if !strings.Contains(stderr.String(), "output persistence failed") {
+		t.Fatalf("missing output persistence warning: %q", stderr.String())
 	}
 }
 

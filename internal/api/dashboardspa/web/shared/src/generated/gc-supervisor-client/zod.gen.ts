@@ -956,6 +956,7 @@ export const zOrderHistoryEntry = z.object({
     has_output: z.boolean(),
     labels: z.array(z.string()).nullable(),
     name: z.string(),
+    outcome: z.string().optional(),
     rig: z.string().optional(),
     scoped_name: z.string(),
     signal: z.string().optional(),
@@ -3205,6 +3206,7 @@ export const zUsageRunToday = z.object({
     output_tokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     run: z.string(),
     session_id: z.string().optional(),
+    timing_complete: z.boolean().optional(),
     unpriced: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     wall_seconds: z.number(),
     worker: z.string().optional()
@@ -3246,6 +3248,7 @@ export const zUsageBody = z.object({
     source: z.enum(['local_estimate', 'unavailable']),
     today: zUsageTotals,
     today_by_run: z.array(zUsageRunToday).nullish(),
+    today_by_run_total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     updated_at: z.string()
 });
 
@@ -8754,6 +8757,10 @@ export const zPostV0CityByCityNameOrderByNameRunResponse = zOrderRunOutputBody;
 
 export const zGetV0CityByCityNameOrdersPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameOrdersQuery = z.object({
+    include_disabled: z.boolean().optional()
 });
 
 /**

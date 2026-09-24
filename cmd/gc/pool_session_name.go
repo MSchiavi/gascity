@@ -998,9 +998,23 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, cityPath, template, as
 // which let a live sibling mask an unrelated dead assignee indefinitely
 // (ga-r22k2y round-1 defect). Requiring the assignee itself to equal the
 // template confines this gate to the one shape it exists for.
+//
+// The gate additionally holds only for canonical-singleton pools
+// (max_active_sessions=1, no namepool): the only shape whose seat carries the
+// bare template as its own claim identity (GC_ALIAS) and can therefore back
+// the claim. Expanded-identity pools (multi-slot, namepool, unbounded) claim
+// under instance identities, so a bare-template assignee there is residue no
+// live seat serves — retaining it while seats live wedges the bead, with pool
+// demand spawning a drain-loop seat per tick that no hook can ever claim
+// (gcy-bzq). The wake filter's template arm
+// (filterAssignedWorkBeadsForSessionWakeWithStores) carries the same scoping:
+// either site alone still wedges.
 func liveEphemeralSessionForTemplate(openSessionInfos []session.Info, cfg *config.City, cityPath string, agentCfg *config.Agent, assignee, template, workStoreRef string, storeRefAware bool) bool {
 	template = strings.TrimSpace(template)
 	if template == "" || strings.TrimSpace(assignee) != template {
+		return false
+	}
+	if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
 		return false
 	}
 	for _, info := range openSessionInfos {

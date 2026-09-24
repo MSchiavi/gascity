@@ -174,6 +174,13 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		return
 	}
 	pending := usagesAfterCursor(usages, cursor)
+	if providerFamily == "muse" {
+		// Muse's model_completed record IDs identify individual calls, and its
+		// extractor scans back to the cursor (or transcript start). On the first
+		// prompt operation, newest-only would persist a cursor past every older
+		// call, preventing the end-of-interval sweep from ever recovering them.
+		pending = usagesSinceCursor(usages, cursor)
+	}
 	if len(pending) == 0 {
 		slog.Debug("invocation telemetry: no new invocations since cursor; skipping",
 			slog.String("session_id", id), slog.String("provider", providerFamily))
@@ -446,7 +453,8 @@ func usageIdentity(u sessionlog.TailUsage) string {
 	return u.EntryUUID
 }
 
-// usagesAfterCursor returns entries strictly after the cursor identity when
+// usagesAfterCursor is the conservative prompt-operation fold for families
+// other than Muse. It returns entries strictly after the cursor identity when
 // the cursor is present in the tail window. Matching on the message identity
 // (not the entry uuid) keeps an invocation single-counted even when its
 // content-block entries straddle a prompt-operation boundary: late blocks of
@@ -468,9 +476,9 @@ func usagesAfterCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 	return usages[len(usages)-1:]
 }
 
-// usagesSinceCursor is the end-of-interval sweep's fold: it returns every window
-// entry strictly after the cursor identity. Unlike usagesAfterCursor (the
-// prompt-op seam's conservative newest-only fallback), when the cursor is empty
+// usagesSinceCursor is the sweep and Muse prompt-operation fold: it returns every
+// window entry strictly after the cursor identity. Unlike usagesAfterCursor
+// (the other prompt-op families' conservative newest-only fallback), when the cursor is empty
 // it returns ALL window entries — the sweep's whole job is to recover the
 // interval's trailing invocations that the prompt-op seam never recorded,
 // bounded only by the extractor's tail window. When the cursor is present but
@@ -563,19 +571,16 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //     Widening it needs its own correctness argument rather than this one: the
 //     codex extractor collapses on cumulative totals rather than per-message
 //     identity, so the cursor is not a usable stop condition there.
-//   - muse: still the fixed 64KB tail, and still silently lossy, for the same
-//     structural reason as codex. SessionLogAdapter.MuseTailUsage accepts the
-//     cursor and discards it; widening it to cursor-bounded growth (the run
-//     record id IS a stable per-message identity, so the stop condition
-//     exists) needs its own latency review on the synchronous lanes first.
+//   - muse: one scan to the transcript start or the 16MB cap, even with a
+//     cursor. A replay of the cursor can appear after newer invocations, so
+//     stopping at its last occurrence would lose those invocations. Repeated
+//     model_completed records collapse at their first physical position before
+//     the caller filters by cursor identity. The cap can still omit older calls.
 //
-// Neither risk the old blanket "do not widen" ceiling cited survives
-// cursor-bounded growth, which is why claude was widened. The scan is not
-// unbounded: it terminates at the cursor, at EOF, or at the growth cap. And it
-// cannot misattribute: with the cursor at byte P and EOF at E, a cap-hit window
-// is exactly [E-16MB, E], every byte of which is after P — so every entry
-// returned is genuinely newer than the cursor, and the only loss is
-// [P, E-16MB), which is precisely what the extractor's cap log reports.
+// Both widened extractors have a 16MB limit. Claude grows its window until it
+// finds the cursor or reaches that limit; Muse scans the full bounded window
+// before folding by first occurrence. If a Muse cursor falls outside that
+// window, older calls may be lost; its cap log reports that limit.
 //
 // Overlap with the prompt-op seam is safe: both stamp usage.ModelIdempotencyKey,
 // which usage.ReadFacts collapses, so an invocation recorded by both beats folds

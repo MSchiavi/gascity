@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestParseDetachedProbeSpec(t *testing.T) {
@@ -93,7 +95,9 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
-			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			// This case owns subprocess exit-code mapping, not the production
+			// deadline. Give exec startup the test-policy scheduling floor.
+			got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", testutil.ExecRaceTimeout)
 			if got.Status != tt.wantStatus {
 				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.wantStatus, got.Err)
 			}
@@ -110,7 +114,9 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 }
 
 func TestProbeDetachedWork_MalformedSpecIsError(t *testing.T) {
-	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity", time.Second)
+	// Keep the production default wrapper directly exercised without starting
+	// a process; malformed specs fail before its deadline can race exec startup.
+	got := probeDetachedWork(context.Background(), "tmux:gascity")
 	if got.Status != detachedProbeError {
 		t.Fatalf("Status = %q, want %q", got.Status, detachedProbeError)
 	}

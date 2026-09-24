@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 )
 
 // This file is the order-class front-door skeleton per
@@ -308,6 +309,25 @@ func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
 func (s *Store) SetOutcome(runID string, outcome RunOutcome) error {
 	if err := s.store.Update(runID, beads.UpdateOpts{Labels: outcome.Labels()}); err != nil {
 		return fmt.Errorf("setting order run outcome on %q: %w", runID, err)
+	}
+	return nil
+}
+
+// SetOutput stores a bounded, already-redacted exec transcript on the tracking
+// bead. Exec runners return combined stdout/stderr, so the existing history
+// output contract reads it from the stdout metadata slot.
+func (s *Store) SetOutput(runID, output string) error {
+	if output == "" {
+		return nil
+	}
+	bounded, truncated := convergence.TruncateOutput([]byte(output), convergence.MaxOutputBytes)
+	if truncated {
+		const marker = "\n[output truncated]"
+		bounded, _ = convergence.TruncateOutput([]byte(output), convergence.MaxOutputBytes-len(marker))
+		bounded += marker
+	}
+	if err := s.store.SetMetadata(runID, convergence.FieldGateStdout, bounded); err != nil {
+		return fmt.Errorf("setting order run output on %q: %w", runID, err)
 	}
 	return nil
 }

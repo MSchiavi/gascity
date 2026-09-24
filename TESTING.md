@@ -988,8 +988,9 @@ bounded how many heavy-suite invocations could run concurrently, producing
 false-red failures (timeouts, OOM-adjacent slowdowns) indistinguishable
 from real regressions.
 
-`scripts/test-local-parallel` — the one place all four heavy targets
-(`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
+`scripts/test-local-parallel` (for `fast`, `cmd-gc-process`, `integration`,
+`full`) and `scripts/with-push-gate-slot` (for direct `make test`, `test-mac`,
+`test-cmd-gc-process`, and their compile/product-metrics recipes) acquire
 one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
 under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
 common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
@@ -1005,10 +1006,9 @@ bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
 naming current slot holders the moment it starts waiting. Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
-bead-ownership staleness. That 75 is only visible to callers that invoke
-`scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
-which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
+bead-ownership staleness. That 75 is directly visible from either script;
+Makefile targets and `.githooks/pre-push` (`exec make test-fast-parallel`)
+run them under `make`, which reports a target error and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
 holding process exits — success, failure, or crash alike — so a stale slot
@@ -1024,19 +1024,29 @@ PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
 contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
 invocation.
 
-The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
-directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
-itself (`fast` and `full` modes) rather than through a `go test` trampoline.
+The slot mechanics are covered by `scripts/test-push-gate-lock.sh` and
+`scripts/test-with-push-gate-slot.sh`, run directly as the
+`push-gate-lock-selftest` job inside `test-local-parallel` (`fast` and `full`
+modes) rather than through a `go test` trampoline.
 A trampoline's `exec.Command` call would itself add a tracked subprocess
 occurrence to `internal/testpolicy/resourcecensus`'s baselines — including
 the `scope=all` audit row, which fails on any change, growth or shrinkage
 alike, with no per-file exemption available — so driving the script as a
 plain shell job avoids that ratchet entirely instead of bumping it.
 
-Only `scripts/test-local-parallel` is wired to this gate — the same targets
-axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
+The sharded runner divides its automatic job count by the configured slot
+count before starting work, even when only one slot is currently occupied.
+An explicit `LOCAL_TEST_JOBS` override is unchanged. Each job also sets
+`GOMAXPROCS` to its per-job budget; `-p` alone does not limit `t.Parallel`
+inside a package. The direct-suite wrapper reserves the same configured
+slot count for its default `GOMAXPROCS` and preserves an explicit caller
+value. Failed sharded jobs keep their complete logs and write every named
+Go test failure to `failure-summary.txt`, including failures beyond the
+first 240 log lines.
+
+Other direct targets (`test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
-`go test` invocations) are outside this bound too.
+`go test` invocations) remain outside this bound.
 
 This mechanism does not extend `bd` claim-lease heartbeats across the
 wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)

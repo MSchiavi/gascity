@@ -885,6 +885,9 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
+	if err := stopCityNudgePollers(cityPath); err != nil {
+		return fmt.Errorf("stopping nudge pollers before storage: %w", err)
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return clearManagedDoltRuntimeStateUnlessBound(cityPath)
 	}

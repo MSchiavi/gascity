@@ -20,6 +20,27 @@ func CommandArgs(cityPath, sessionName, agentName string) []string {
 	return []string{"nudge", "poll", cityFlag, cityPath, sessionFlag, sessionName, agentName}
 }
 
+// CityCmdlineMatcher recognizes sidecars launched by CommandArgs for one city.
+// Shutdown uses this with the city's existing poller PID files; a PID alone is
+// never authority to signal a process.
+func CityCmdlineMatcher(cityPath string) func([]string) bool {
+	expectedCity := pathutil.NormalizePathForCompare(cityPath)
+	return func(argv []string) bool {
+		if expectedCity == "" || len(argv) <= 3 || argv[1] != "nudge" || argv[2] != "poll" {
+			return false
+		}
+		// Refuse ambiguous duplicate flags instead of guessing which city
+		// the command parser selected.
+		cities := 0
+		for _, arg := range argv[3:] {
+			if arg == cityFlag || strings.HasPrefix(arg, cityFlag+"=") {
+				cities++
+			}
+		}
+		return cities == 1 && argvHasPathFlagValue(argv, cityFlag, expectedCity)
+	}
+}
+
 // CmdlineMatcher returns a predicate that recognizes the nudge poller command
 // for the supplied city, session, and target key.
 func CmdlineMatcher(cityPath, sessionName, agentName string) func([]string) bool {

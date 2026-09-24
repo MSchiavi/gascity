@@ -200,14 +200,8 @@ push_gate_city_root() {
     return 1
 }
 
-# Print the slot directory to use (city-rooted, or common-Git-dir fallback).
-# Does not create it.
-push_gate_slots_dir() {
-    local _pgs_city_root
-    if _pgs_city_root="$(push_gate_city_root)"; then
-        printf '%s/.gc/gate-slots\n' "$_pgs_city_root"
-        return 0
-    fi
+# Print the shared common-Git-dir fallback, including for linked worktrees.
+push_gate_git_slots_dir() {
     # --git-common-dir (Git 2.5+) may print a path relative to $PWD, so
     # absolutize it here rather than with --path-format=absolute (Git 2.31+):
     # git rev-parse echoes an unrecognized option and still exits 0, which
@@ -219,6 +213,17 @@ push_gate_slots_dir() {
         return 0
     fi
     return 1
+}
+
+# Print the slot directory to use (city-rooted, or common-Git-dir fallback).
+# Does not create it.
+push_gate_slots_dir() {
+    local _pgs_city_root
+    if _pgs_city_root="$(push_gate_city_root)"; then
+        printf '%s/.gc/gate-slots\n' "$_pgs_city_root"
+        return 0
+    fi
+    push_gate_git_slots_dir
 }
 
 # Print one diagnostic line per currently-occupied slot.

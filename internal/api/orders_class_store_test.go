@@ -2,15 +2,74 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
+
+type missingOrdersBindingState struct{ State }
+
+func (missingOrdersBindingState) OrdersBeadStore() beads.OrdersStore {
+	return beads.OrdersStore{}
+}
+
+type failedOrderGetStore struct{ beads.Store }
+
+func (failedOrderGetStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("binding read failed")
+}
+
+func TestOrderReadsRejectMissingRequiredBindings(t *testing.T) {
+	for _, missing := range []string{"city", "orders"} {
+		t.Run(missing, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cityBeadStore = beads.NewMemStore()
+			fs.ordersBeadStore = beads.NewMemStore()
+			fs.autos = []orders.Order{{Name: "review", Rig: "myrig", Trigger: "cooldown", Interval: "1m"}}
+			var state State = fs
+			if missing == "city" {
+				fs.cityBeadStore = nil
+			} else {
+				state = missingOrdersBindingState{State: fs}
+			}
+			h := newTestCityHandler(t, state)
+			for _, path := range []string{
+				"/orders/check",
+				"/orders/history?scoped_name=review:rig:myrig",
+				"/order/history/any-bead?store_ref=rig:myrig",
+			} {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, path), nil))
+				if w.Code != http.StatusServiceUnavailable {
+					t.Errorf("%s status = %d, want 503; body = %s", path, w.Code, w.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestOrderOutputRejectsEarlierBindingReadError(t *testing.T) {
+	fs := newFakeState(t)
+	city := beads.NewMemStore()
+	ordersStore := beads.NewMemStore()
+	bead := seedClosedOrderRunBead(t, ordersStore, "review", "stored output")
+	fs.cityBeadStore = failedOrderGetStore{Store: city}
+	fs.ordersBeadStore = ordersStore
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+bead.ID), nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+	}
+}
 
 // The order-tracking bead is orders class, and on a city whose infrastructure
 // classes are served by their own binding the controller creates it there. Every
@@ -221,6 +280,48 @@ func splitOrdersFakeState(t *testing.T) (*fakeState, beads.Store) {
 	return st, binding
 }
 
+func TestRetiredRigOrderHistoryAndOutputFromSurvivingStores(t *testing.T) {
+	for _, storeName := range []string{"city", "orders"} {
+		t.Run(storeName, func(t *testing.T) {
+			st := newFakeState(t)
+			st.cityBeadStore = beads.NewMemStore()
+			st.ordersBeadStore = beads.NewMemStore()
+			st.cfg.Rigs = nil
+			st.stores = nil
+			store := st.cityBeadStore
+			wantRef := "city:test-city"
+			if storeName == "orders" {
+				store = st.ordersBeadStore
+				wantRef = "orders:test-city"
+			}
+			bead := seedClosedOrderRunBead(t, store, "nightly-review:rig:retired", storeName+" output")
+			h := newTestCityHandler(t, st)
+			beadID, storeRef := orderHistoryListStoreRef(t, h, st, "nightly-review:rig:retired")
+			if beadID != bead.ID || storeRef != wantRef {
+				t.Fatalf("history identity = %s/%s, want %s/%s", beadID, storeRef, bead.ID, wantRef)
+			}
+			status, detail := orderHistoryDetail(t, h, st, beadID, storeRef)
+			if status != http.StatusOK || detail.BeadID != bead.ID || detail.StoreRef != wantRef || detail.Output != storeName+" output" {
+				t.Fatalf("detail status = %d, body = %+v", status, detail)
+			}
+		})
+	}
+}
+
+func TestConfiguredRigWithoutStoreDoesNotReturnPartialOrderHistory(t *testing.T) {
+	st := newFakeState(t)
+	st.cityBeadStore = beads.NewMemStore()
+	st.ordersBeadStore = beads.NewMemStore()
+	st.stores = nil
+	seedClosedOrderRunBead(t, st.cityBeadStore, "nightly-review:rig:myrig", "city output")
+	h := newTestCityHandler(t, st)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(st, "/orders/history?scoped_name=nightly-review:rig:myrig"), nil))
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "\"entries\"") {
+		t.Fatalf("status = %d, body = %s; want unavailable history", w.Code, w.Body.String())
+	}
+}
+
 // TestOrderHistoryListStoreRefRoundTripsToDetail is the list->detail contract:
 // the store_ref the list hands a client is the handle the detail endpoint takes
 // back. An endpoint that mints a ref its sibling rejects answers 404 for every
@@ -341,5 +442,58 @@ func TestOrderHistoryStoreRefUnchangedOnSingleStoreCity(t *testing.T) {
 	}
 	if body.StoreRef != "city:test-city" {
 		t.Fatalf("detail store_ref without a hint = %q, want city:test-city", body.StoreRef)
+	}
+}
+
+type fixedHistoryRowsStore struct {
+	beads.Store
+	row beads.Bead
+}
+
+func (s fixedHistoryRowsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Label == "order-run:review:rig:myrig" {
+		return []beads.Bead{s.row}, nil
+	}
+	return s.Store.List(q)
+}
+
+func TestOrderHistoryKeepsStoreOrderForEqualTimestamps(t *testing.T) {
+	st := newFakeState(t)
+	st.autos = []orders.Order{{Name: "review", Rig: "myrig"}}
+	createdAt := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+	store := func(id string) beads.Store {
+		return &fixedHistoryRowsStore{
+			Store: beads.NewMemStore(),
+			row: beads.Bead{
+				ID:        id,
+				CreatedAt: createdAt,
+				Status:    "closed",
+				Labels:    []string{"order-run:review:rig:myrig", "wisp"},
+			},
+		}
+	}
+	st.stores["myrig"] = store("rig-run")
+	st.cityBeadStore = store("city-run")
+	st.ordersBeadStore = store("orders-run")
+
+	w := httptest.NewRecorder()
+	newTestCityHandler(t, st).ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		cityURL(st, "/orders/history?scoped_name=review:rig:myrig&limit=2"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Entries []struct {
+			BeadID   string `json:"bead_id"`
+			StoreRef string `json:"store_ref"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Entries) != 2 ||
+		response.Entries[0].BeadID != "rig-run" || response.Entries[0].StoreRef != "rig:myrig" ||
+		response.Entries[1].BeadID != "city-run" || response.Entries[1].StoreRef != "city:test-city" {
+		t.Fatalf("entries = %+v, want stable rig then city prefix at equal timestamps", response.Entries)
 	}
 }

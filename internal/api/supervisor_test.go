@@ -566,8 +566,7 @@ func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"gc-work": s,
 	})
-	srv := httptest.NewServer(sm)
-	t.Cleanup(srv.Close)
+	srv := newSupervisorHTTPTestServer(t, sm)
 
 	for _, path := range []string{
 		"/v0/events/stream",
@@ -597,6 +596,16 @@ func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newSupervisorHTTPTestServer is the existing supervisor listener owner, shared
+// by the header and shutdown tests so they exercise real net/http drain without
+// adding another test listener to the resource ledger.
+func newSupervisorHTTPTestServer(t *testing.T, sm *SupervisorMux) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(sm.Handler())
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func TestSupervisorPerCityEventStreamEmitsTypedEnvelopePayloadObject(t *testing.T) {

@@ -1343,6 +1343,11 @@ describe('supervisor client wrapper', () => {
       sessionTranscript: vi.fn(),
       workflowRun: vi.fn(),
       formulaDetail: vi.fn(),
+      listOrders: vi.fn(),
+      getOrder: vi.fn(),
+      listOrderChecks: vi.fn(),
+      orderHistory: vi.fn(),
+      orderHistoryDetail: vi.fn(),
     };
 
     setSupervisorApiForTests(fake);

@@ -7,7 +7,7 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 . "$PACK_DIR/assets/scripts/_notify.sh"
 
@@ -206,7 +206,20 @@ acquire_backup_lock() {
 
 # --- Step 1: Preflight Dolt version before backup sync ---
 
-DOLT_VERSION="$(dolt version 2>/dev/null | awk 'NR == 1 {print $NF}' || true)"
+VERSION_STATUS=0
+VERSION_OUTPUT=$(run_bounded 10 dolt version 2>&1) || VERSION_STATUS=$?
+DOLT_VERSION=$(printf '%s\n' "$VERSION_OUTPUT" | awk '$1 == "dolt" && $2 == "version" && NF == 3 {print $3; exit}')
+if [ "$VERSION_STATUS" -ne 0 ] || ! [[ "$DOLT_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][^[:space:]]+)?$ ]]; then
+    dolt_escalate \
+        "Dolt backup: version-unavailable [HIGH]" \
+        "Skipping backup sync: could not determine the Dolt version (probe exit $VERSION_STATUS). Check the Dolt executable and its startup output; no version comparison was possible." \
+        2>/dev/null || true
+    SUMMARY="backup — version-unavailable (probe exit $VERSION_STATUS)"
+    dolt_notify_done "$SUMMARY"
+    echo "backup: $SUMMARY"
+    printf '%s\n' "$VERSION_OUTPUT" >&2
+    exit 1
+fi
 if ! dolt_version_at_least "$DOLT_VERSION" "$MIN_DOLT_BACKUP_VERSION"; then
     dolt_escalate \
         "Dolt backup: dolt-too-old for backup sync [HIGH]" \
@@ -231,8 +244,20 @@ acquire_backup_lock
 if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
     DATABASES=$(echo "$GC_BACKUP_DATABASES" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
 else
-    ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | \
-        grep -viE "$SYSTEM_DBS" || true)
+    if DISCOVERY_OUTPUT=$(dolt_sql -r csv -q "SHOW DATABASES" 2>&1); then
+        ALL_DBS=$(printf '%s\n' "$DISCOVERY_OUTPUT" | tail -n +2 | grep -viE "$SYSTEM_DBS" || true)
+    else
+        discovery_status=$?
+        dolt_escalate \
+            "Dolt backup: database discovery failed [HIGH]" \
+            "Skipping backup sync: SHOW DATABASES failed (exit $discovery_status). Backup coverage could not be determined." \
+            2>/dev/null || true
+        SUMMARY="backup — database discovery failed (exit $discovery_status)"
+        dolt_notify_done "$SUMMARY"
+        echo "backup: $SUMMARY" >&2
+        printf '%s\n' "$DISCOVERY_OUTPUT" >&2
+        exit 1
+    fi
     DATABASES=""
     for db in $ALL_DBS; do
         if [ -d "$DOLT_DATA_DIR/$db/.dolt" ]; then
@@ -338,7 +363,7 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
 
 Each database was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostic from the final attempt:$FAILED_DETAILS
 
-A database listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per database under $BACKUP_ARTIFACT_DIR rather than trusting this message alone." \
+A database listed here received no new backup from this run. Prior backup availability and freshness are unknown; inspect each database under $BACKUP_ARTIFACT_DIR." \
         2>/dev/null || true
 fi
 
@@ -347,19 +372,25 @@ fi
 # otherwise only when they need it. This was previously labelled "non-fatal"
 # and reported nowhere but the summary line — an installation lost three days
 # of offsite coverage on part of its city before a human noticed by accident.
-# Non-fatal it is (the local backup did succeed, so the run does not fail);
-# silent it must not be.
 case "$OFFSITE_STATUS" in
     ok|skipped) ;;
     *)
+        if [ "$FAILED_COUNT" -eq 0 ]; then
+            LOCAL_COVERAGE="Local backup sync succeeded for all configured databases ($SYNCED/$TOTAL)."
+        elif [ "$SYNCED" -eq 0 ]; then
+            LOCAL_COVERAGE="Local backup sync failed for all configured databases (0/$TOTAL). This run produced no successful database backup."
+        else
+            LOCAL_COVERAGE="Local backup sync was partial: $SYNCED/$TOTAL databases synced; failed databases: $FAILED_DBS. Only successfully synced databases have new local backup data from this run."
+        fi
         dolt_escalate \
             "Dolt backup: offsite publication $OFFSITE_STATUS [MEDIUM]" \
-            "Local backup succeeded ($SYNCED/$TOTAL databases) but publication to $OFFSITE_PATH did not.
+            "$LOCAL_COVERAGE
+Publication to $OFFSITE_PATH did not complete.
 Status: $OFFSITE_STATUS. Bound: ${OFFSITE_TIMEOUT}s (raise with GC_BACKUP_OFFSITE_TIMEOUT).
 Raising it past the run's remaining budget also needs timeout raised in
 examples/bd/dolt/orders/mol-dog-backup.toml, or the controller kills this run
 mid-rsync and this escalation never fires.
-Until this clears, the only copy of these databases is on this host." \
+Check local and offsite backup freshness per database; this run does not establish whether older offsite copies exist." \
             2>/dev/null || true
         ;;
 esac
@@ -367,3 +398,6 @@ esac
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"
+if [ "$FAILED_COUNT" -gt 0 ]; then
+    exit 1
+fi

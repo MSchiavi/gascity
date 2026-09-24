@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Run one direct heavy test recipe under the same gate as sharded suites.
+set -euo pipefail
+
+if [[ $# -lt 3 || "$2" != "--" ]]; then
+  echo "usage: scripts/with-push-gate-slot <label> -- <command...>" >&2
+  exit 2
+fi
+label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:$1"
+shift 2
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# shellcheck source=push-gate-lock-lib.sh
+source "$repo_root/scripts/push-gate-lock-lib.sh"
+# shellcheck source=lib/harness-reap.sh
+source "$repo_root/scripts/lib/harness-reap.sh"
+# shellcheck source=lib/inner-parallelism.sh
+source "$repo_root/scripts/lib/inner-parallelism.sh"
+
+gate_fd=""
+if [[ "${GC_PUSH_GATE_SLOT_HELD:-}" != "1" ]]; then
+  gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$(push_gate_git_slots_dir)" || {
+    echo "push-gate: cannot resolve a shared slot directory" >&2
+    exit 1
+  }
+  if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$label"; then
+    echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+    exit 75
+  fi
+fi
+export GC_PUSH_GATE_SLOT_HELD=1
+
+# A direct suite's Go test binaries also need a CPU budget. Reserve all
+# configured slots before either starts; an explicit caller value wins.
+if [[ -z "${GOMAXPROCS:-}" ]]; then
+  raw_jobs="$("$repo_root/scripts/test-local-job-count")"
+  gate_slots=1
+  if [[ "${GC_PUSH_GATE_NO_CAP:-}" != "1" && ( -n "$gate_fd" || "${GC_PUSH_GATE_SLOT_HELD:-}" == "1" ) ]]; then
+    gate_slots="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
+  fi
+  GOMAXPROCS="$(gc_shared_auto_jobs "$raw_jobs" "$gate_slots")"
+  export GOMAXPROCS
+fi
+
+# Makefile's env -i allowlist is expanded by make's shell before this wrapper
+# runs. Replace its empty GOMAXPROCS argument with the budget computed above;
+# an explicit nonempty argument remains untouched.
+child_args=("$@")
+if [[ "${child_args[0]:-}" == env && "${child_args[1]:-}" == -i ]]; then
+  for (( i = 2; i < ${#child_args[@]}; i++ )); do
+    if [[ "${child_args[i]}" == GOMAXPROCS= ]]; then
+      child_args[i]="GOMAXPROCS=$GOMAXPROCS"
+    fi
+  done
+fi
+
+gate_on_signal() {
+  local sig="$1"
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
+  trap - "$sig"
+  kill -"$sig" $$
+}
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"; push_gate_release_slot "$gate_fd"' EXIT
+trap 'gate_on_signal INT' INT
+trap 'gate_on_signal TERM' TERM
+trap 'gate_on_signal HUP' HUP
+
+# Only this parent holds the slot descriptor. The supervised process group
+# closes its copy before exec, so escaped descendants cannot pin the lock.
+run_gate_child() {
+  if [[ -n "$gate_fd" ]]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  exec "$@"
+}
+
+set +e
+gc_harness_run_supervised "$label" "" 0 -- run_gate_child "${child_args[@]}"
+status=$?
+set -e
+exit "$status"

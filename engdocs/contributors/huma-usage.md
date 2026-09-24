@@ -301,6 +301,12 @@ do not support precheck errors; an op like `stream-events` that
 needs to 503 before committing stream headers has to use our
 `registerSSE` wrapper instead.
 
+These wrappers register each typed stream with its owning `SupervisorMux`.
+See the [API Control Plane's SSE rules](../architecture/api-control-plane.md#34-no-hand-constructed-json-for-domain-data)
+for shutdown behavior and the integration-only `ServeSeededCity` ownership
+contract. Keep SSE handlers reading their request context through
+`hctx.Context()` so they inherit cancellation.
+
 ## 10. When to reach for `CreateHooks = nil`
 
 Huma's default `Config` installs a `SchemaLinkTransformer` that

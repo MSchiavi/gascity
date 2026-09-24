@@ -92,6 +92,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Responses:   sseResponseHeaders("GC-Agent-Status"),
 	}, agentOutputEventMap,
 		sseCityPrecheck(sm, (*Server).checkAgentOutputStream),
+		sm.sseStreams,
 		sseCityStream(sm, (*Server).streamAgentOutput))
 	registerSSE(sm.humaAPI, huma.Operation{
 		OperationID: "stream-agent-output-qualified",
@@ -102,6 +103,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Responses:   sseResponseHeaders("GC-Agent-Status"),
 	}, agentOutputEventMap,
 		sseCityPrecheck(sm, (*Server).checkAgentOutputStreamQualified),
+		sm.sseStreams,
 		sseCityStream(sm, (*Server).streamAgentOutputQualified))
 
 	// Providers.
@@ -426,6 +428,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Responses: sseResponseHeaders("GC-Session-State", "GC-Session-Status"),
 	}, sessionStreamEventMap(),
 		sseCityPrecheck(sm, (*Server).checkSessionStream),
+		sm.sseStreams,
 		sseCityStringIDStream(sm, (*Server).streamSession))
 
 	// Event SSE stream (per-city).
@@ -444,6 +447,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		"heartbeat": HeartbeatEvent{},
 	},
 		sseCityPrecheck(sm, (*Server).checkEventStream),
+		sm.sseStreams,
 		sseCityStream(sm, (*Server).streamEvents))
 
 	// ExtMsg.

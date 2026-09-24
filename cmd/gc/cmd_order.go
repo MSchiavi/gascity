@@ -984,6 +984,9 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	}
 
 	result := doOrderRunExecResult(a, cityPath, cfg, vars, stdout, stderr)
+	if err := front.SetOutput(run.ID, result.output); err != nil {
+		fmt.Fprintf(stderr, "gc order run: storing exec output for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+	}
 	outcome := orders.RunOutcomeExec
 	if result.code != 0 {
 		outcome = orders.RunOutcomeExecFailed
@@ -1006,6 +1009,7 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, vars map[
 type orderRunExecResult struct {
 	code         int
 	failureLabel string
+	output       string // redacted combined stdout/stderr for bounded run history
 }
 
 func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
@@ -1034,18 +1038,19 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 	// and combined output against the projected env on both the failure and
 	// success paths, matching the controller dispatch path (order_dispatch.go).
 	redactionEnv := append(os.Environ(), env...)
+	redactedOutput := execenv.RedactText(string(output), redactionEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: exec failed: %s\n", execenv.RedactText(err.Error(), redactionEnv)) //nolint:errcheck
 		if len(output) > 0 {
-			fmt.Fprintf(stderr, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s", redactedOutput) //nolint:errcheck
 		}
-		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
+		return orderRunExecResult{code: 1, failureLabel: "exec-failed", output: redactedOutput}
 	}
 	if len(output) > 0 {
-		fmt.Fprintf(stdout, "%s", execenv.RedactText(string(output), redactionEnv)) //nolint:errcheck
+		fmt.Fprintf(stdout, "%s", redactedOutput) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
-	return orderRunExecResult{code: 0}
+	return orderRunExecResult{code: 0, output: redactedOutput}
 }
 
 // --- gc order check ---

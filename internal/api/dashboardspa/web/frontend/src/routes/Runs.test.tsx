@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   GC_EVENT_PREFIX,
@@ -20,6 +20,11 @@ import {
   loadSupervisorRunSummaryPreviewSource,
   loadSupervisorRunSummarySource,
 } from '../supervisor/runSummary';
+
+const mockRunCensus = vi.hoisted(() => vi.fn());
+vi.mock('../supervisor/client', () => ({
+  supervisorApi: () => ({ runCensus: mockRunCensus }),
+}));
 
 // gascity-dashboard-bqn: regression coverage for the live-updates wiring
 // on /runs. The actual SSE / coalesce / reconnect behavior lives in
@@ -184,9 +189,22 @@ beforeEach(() => {
   mockLoadRunSummaryPreview.mockReset();
   mockLoadRunSummary.mockReset();
   mockLoadRunSummaryActive.mockReset();
+  mockRunCensus.mockReset().mockResolvedValue({
+    status_counts: {
+      pending: 0,
+      active: 0,
+      waiting: 0,
+      canceling: 0,
+      completed: 0,
+      failed: 0,
+      canceled: 0,
+      skipped: 0,
+    },
+  });
   lastHookCall.prefixes = null;
   lastHookCall.onMatch = null;
   invalidateKey('runs:summary:racoon-city');
+  invalidateKey('runs:census:racoon-city');
   mockLoadRunSummaryPreview.mockResolvedValue(buildRunSource('fresh'));
   mockLoadRunSummary.mockResolvedValue(buildRunSource('fresh'));
   mockLoadRunSummaryActive.mockResolvedValue(buildRunSource('fresh'));
@@ -234,6 +252,198 @@ async function waitForMount() {
 }
 
 describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
+  it('labels the fallback count as non-stale when a stale lane is visible', async () => {
+    const source = buildRunSource('stale');
+    const summary = requireRunData(source);
+    summary.lanes = [activeLane({ title: 'Stale formula run' })];
+    summary.totalActive = 0;
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
+
+    mount();
+
+    expect(await screen.findByText('Stale formula run')).toBeTruthy();
+    expect(
+      screen.getByText(/0 non-stale active lanes; canonical state counts unavailable/i),
+    ).toBeTruthy();
+  });
+
+  it('does not call a blocked-only lane count runs in flight when census is unavailable', async () => {
+    const source = buildRunSource('fresh');
+    const summary = requireRunData(source);
+    summary.totalActive = 0;
+    summary.blockedLanes = [
+      activeLane({ title: 'Blocked formula run', phase: 'blocked', phaseLabel: 'blocked' }),
+    ];
+    summary.runCounts = { ...summary.runCounts, total: 1, blocked: 1 };
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
+
+    mount();
+
+    expect(await screen.findByRole('region', { name: /blocked runs/i })).toBeTruthy();
+    expect(
+      screen.getByText(/0 non-stale active lanes; canonical state counts unavailable/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/0 runs in flight/i)).toBeNull();
+  });
+
+  it('withholds partial census counts', async () => {
+    mockRunCensus.mockResolvedValue({
+      partial: true,
+      status_counts: {
+        pending: 2,
+        active: 3,
+        waiting: 0,
+        canceling: 0,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    const inFlight = screen.getByText('In flight');
+    expect(inFlight.nextElementSibling?.textContent).toBe('—');
+    expect(screen.queryByText(/2 queued/)).toBeNull();
+  });
+
+  it('keeps canonical counts when lane details fail', async () => {
+    const laneFailure = {
+      source: 'runs',
+      status: 'error',
+      error: 'lane collector unavailable',
+    } satisfies SourceState<RunSummary>;
+    mockLoadRunSummaryPreview.mockResolvedValue(laneFailure);
+    mockLoadRunSummary.mockResolvedValue(laneFailure);
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 2,
+        active: 1,
+        waiting: 0,
+        canceling: 0,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/2 queued · 1 running/)).toBeTruthy();
+    expect(
+      screen.getByText(/run lane details unavailable: lane collector unavailable/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/run counts unavailable/i)).toBeNull();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('3');
+  });
+
+  it('shows canonical counts while lane details load', async () => {
+    mockLoadRunSummaryPreview.mockImplementation(() => new Promise(() => undefined));
+    mockLoadRunSummary.mockImplementation(() => new Promise(() => undefined));
+
+    mount();
+
+    expect(await screen.findByText(/0 queued · 0 running/)).toBeTruthy();
+    expect(screen.getByText(/loading formula run lanes/i)).toBeTruthy();
+    expect(screen.getByText('Loading formula runs.')).toBeTruthy();
+  });
+
+  it('withholds canonical counts while the census loads', async () => {
+    mockRunCensus.mockImplementation(() => new Promise(() => undefined));
+
+    mount();
+
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('—');
+  });
+
+  it('withholds cached census counts after a failed refresh', async () => {
+    mockRunCensus
+      .mockResolvedValueOnce({
+        status_counts: {
+          pending: 2,
+          active: 3,
+          waiting: 0,
+          canceling: 0,
+          completed: 0,
+          failed: 0,
+          canceled: 0,
+          skipped: 0,
+        },
+      })
+      .mockRejectedValueOnce(new Error('census refresh failed'));
+
+    mount();
+
+    expect(await screen.findByText(/2 queued/)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+    });
+    expect(await screen.findByText(/canonical state counts unavailable/i)).toBeTruthy();
+    expect(screen.getByText('In flight').nextElementSibling?.textContent).toBe('—');
+  });
+
+  it('keeps canonical open-run counts separate from unavailable lane details', async () => {
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 0,
+        active: 1,
+        waiting: 2,
+        canceling: 1,
+        completed: 0,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    const inFlight = await screen.findByText('In flight');
+    expect(screen.getByText(/2 waiting/)).toBeTruthy();
+    expect(screen.getByText(/1 canceling/)).toBeTruthy();
+    expect(inFlight.nextElementSibling?.textContent).toBe('4');
+    const nonStaleLanes = screen.getByText('Non-stale lanes');
+    expect(nonStaleLanes.nextElementSibling?.textContent).toBe('0');
+    expect(screen.getByText(/4 open runs have no lane details in this summary/i)).toBeTruthy();
+    expect(screen.queryByText(/No formula runs in flight/i)).toBeNull();
+  });
+
+  it('uses canonical run states instead of calling queued lanes active', async () => {
+    const source = buildRunSource('fresh');
+    const summary = requireRunData(source);
+    summary.totalActive = 41;
+    summary.runCounts.total = 41;
+    summary.lanes = [activeLane({ id: 'queued-wisp', title: 'Queued wisp' })];
+    mockLoadRunSummaryPreview.mockResolvedValue(source);
+    mockLoadRunSummary.mockResolvedValue(source);
+    mockRunCensus.mockResolvedValue({
+      status_counts: {
+        pending: 41,
+        active: 0,
+        waiting: 0,
+        canceling: 0,
+        completed: 644,
+        failed: 0,
+        canceled: 0,
+        skipped: 0,
+      },
+    });
+
+    mount();
+
+    expect(await screen.findByText(/41 queued/)).toBeTruthy();
+    expect(screen.getByText(/0 running/)).toBeTruthy();
+    expect(screen.queryByText(/41 active runs/)).toBeNull();
+    expect(screen.getByText('Queued', { selector: 'span' })).toBeTruthy();
+  });
   it('paints from the fast preview source before the full run summary resolves', async () => {
     const preview = buildRunSource('fresh');
     const previewRuns = requireRunData(preview);
@@ -343,6 +553,7 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
       status: 'error',
       error: 'run collector unavailable in test',
     } satisfies SourceState<RunSummary>);
+    mockRunCensus.mockRejectedValue(new Error('census unavailable'));
 
     mount();
     await waitForMount();
@@ -390,7 +601,7 @@ describe('RunsPage — SSE wiring (gascity-dashboard-bqn)', () => {
     mount();
     await waitForMount();
     expect(screen.queryByText('Completed formula run')).toBeNull();
-    expect(await screen.findByText(/No active formula runs\. \(1 completed\.\)/i)).toBeTruthy();
+    expect(await screen.findByText(/No formula runs in flight\. \(1 completed\.\)/i)).toBeTruthy();
     // The toggle button is enabled (totalHistorical > 0) and labeled
     // with the count.
     const toggleDefault = (await screen.findByRole('button', {
@@ -582,6 +793,7 @@ describe('RunsPage — partial lane set (gascity-dashboard-n6f1)', () => {
     expect(marker).toBeTruthy();
     expect(marker.getAttribute('role')).toBe('status');
     expect(live.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/run lane details partial/i)).toBeTruthy();
   });
 
   it('omits the partial signal on a clean direct run source', async () => {

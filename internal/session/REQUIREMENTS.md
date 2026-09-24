@@ -151,6 +151,7 @@ unless the row names how they map to the canonical projection.
 | SESSION-WORK-002 | Confirmed-dead pool workers release work | A pool worker confirmed dead by runtime/provider checks can be closed even when assigned work exists; closing releases the orphaned work. Suspended, orphaned, or reconfigured guards still apply. | commit `47b580e9f`; `cmd/gc/session_beads_test.go` |
 | SESSION-WORK-003 | Orphan pool step beads | Open pool step beads assigned to dead session identities are collected and released after session drain without relying on stale snapshots. | commit `8068393d8`; `cmd/gc/pool_session_name_test.go` (`TestCollectAndReleaseOrphanPoolStepBead_Issue2793`) |
 | SESSION-WORK-004 | No-wake drains cancel on assigned work | Pending no-wake or orphan drains are canceled when assigned work reappears, and recovered drain-ack metadata is not allowed to suppress that wake demand. | commit `d565a34e2`; `cmd/gc/session_reconciler_test.go`; `cmd/gc/session_wake_test.go` |
+| SESSION-WORK-005 | Expanded-pool bare-template residue | A bare-template assignment is not reachable through an expanded pool seat and must be released with its route preserved. Canonical singleton pools retain the assignment their seat can claim. | port of `2f3ebc56d` (gcy-bzq); `cmd/gc/assigned_work_scope_test.go`; `cmd/gc/pool_session_name_route_assignee_liveness_test.go`; both `OrphanReleaseCallSite` tests |
 
 ### Runtime, Submit, And Observation
 

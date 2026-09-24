@@ -99,16 +99,17 @@ export interface AggregateRunRates {
   tokensPerMinute: number | null;
   dollarsPerMinute: number | null;
   runs: number;
+  timingUnknown: boolean;
 }
 
 /**
  * Aggregate per-run rows into a single tokens/min + dollars/min reading with
  * the summed wall-clock as the rate basis. Null when there are no rows; each
- * rate is independently null when its basis is missing (no wall-clock) or its
- * numerator is invalid.
+ * rate is null when any row lacks proven timing for its usage.
  */
 export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunRates | null {
   if (rows.length === 0) return null;
+  const timingUnknown = rows.some((row) => !runRateAvailable(row));
   const totals: UsageTotals = {
     invocations: 0,
     compute_facts: 0,
@@ -129,10 +130,15 @@ export function aggregateRunRates(rows: readonly UsageRunToday[]): AggregateRunR
     totals.cost_usd_estimate += finiteNonNegative(row.cost_usd_estimate);
   }
   return {
-    tokensPerMinute: tokensPerMinute(totals, totals.wall_seconds),
-    dollarsPerMinute: dollarsPerMinute(totals, totals.wall_seconds),
+    tokensPerMinute: timingUnknown ? null : tokensPerMinute(totals, totals.wall_seconds),
+    dollarsPerMinute: timingUnknown ? null : dollarsPerMinute(totals, totals.wall_seconds),
     runs: rows.length,
+    timingUnknown,
   };
+}
+
+export function runRateAvailable(row: UsageRunToday): boolean {
+  return row.timing_complete === true && Number.isFinite(row.wall_seconds) && row.wall_seconds > 0;
 }
 
 const PHASE_STAGE: Record<string, number> = {

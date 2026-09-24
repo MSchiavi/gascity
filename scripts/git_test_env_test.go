@@ -1,7 +1,9 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,119 +80,103 @@ print-test-env-git:
 
 func TestShardTestEnvsIgnoreUserGitConfiguration(t *testing.T) {
 	repoRoot := repoRoot(t)
-	for _, path := range []string{
-		"scripts/test-local-parallel",
-		"scripts/test-go-test-shard",
-		"scripts/test-integration-shard",
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"test-local-parallel", []string{"scripts/test-local-parallel", "fast"}},
+		{"test-go-test-shard", []string{"scripts/test-go-test-shard", "./internal/sessionlog", "1", "1"}},
+		{"test-integration-shard", []string{"scripts/test-integration-shard", "review-formulas-recovery"}},
 	} {
-		t.Run(path, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(repoRoot, path))
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := t.TempDir()
+			binDir := filepath.Join(fixture, "bin")
+			home := filepath.Join(fixture, "home")
+			for _, dir := range []string{binDir, home} {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[commit]\n\tgpgsign = true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			probeOut := filepath.Join(fixture, "probe.out")
+			probePath := filepath.Join(binDir, "probe")
+			probe := fmt.Sprintf(`#!/bin/sh
+printf 'nosystem=%%s\n' "$GIT_CONFIG_NOSYSTEM" > %s
+printf 'global=%%s\n' "$GIT_CONFIG_GLOBAL" >> %s
+printf 'gitdir=%%s\n' "${GIT_DIR-unset}" >> %s
+if git config --global --get commit.gpgsign >/dev/null 2>&1; then
+  printf 'gpgsign=set\n' >> %s
+else
+  printf 'gpgsign=unset\n' >> %s
+fi
+`, shellQuote(probeOut), shellQuote(probeOut), shellQuote(probeOut), shellQuote(probeOut), shellQuote(probeOut))
+			if err := os.WriteFile(probePath, []byte(probe), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fakeGo := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = env ]; then exec %s "$@"; fi
+for arg do
+  if [ "$arg" = -list ]; then
+    printf 'TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash\nTestGitConfigProbe\n'
+    exit 0
+  fi
+done
+exec %s
+`, shellQuote(realGo), shellQuote(probePath))
+			if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "test-local-parallel" {
+				fakeXargs := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+while [ "$1" != bash ]; do shift; done
+exec "$@" %s
+`, shellQuote("probe::"+probePath))
+				if err := os.WriteFile(filepath.Join(binDir, "xargs"), []byte(fakeXargs), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := testCommand("bash", append([]string{filepath.Join(repoRoot, tc.args[0])}, tc.args[1:]...)...)
+			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"HOME="+home,
+				"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
+				"GIT_CONFIG_NOSYSTEM=0",
+				"GIT_DIR=/poison/.git",
+				"GC_PUSH_GATE_NO_CAP=1",
+				"LOCAL_TEST_JOBS=1",
+				"GO_TEST_TIMEOUT=999h",
+				"GO_TEST_WATCHDOG_GRACE=off",
+			)
+			out, err := cmd.CombinedOutput()
 			if err != nil {
-				t.Fatalf("read %s: %v", path, err)
+				t.Fatalf("%s: %v\n%s", tc.name, err, out)
 			}
-			content := string(data)
-			for _, pin := range []string{
-				"GIT_CONFIG_NOSYSTEM=1",
-				`GIT_CONFIG_GLOBAL="$gc_test_gitconfig"`,
-				`gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"`,
-			} {
-				if got := strings.Count(content, pin); got != 1 {
-					t.Errorf("%s has %d occurrences of %q, want 1", path, got, pin)
+			data, err := os.ReadFile(probeOut)
+			if err != nil {
+				t.Fatalf("%s: read child environment: %v\n%s", tc.name, err, out)
+			}
+			for _, want := range []string{"nosystem=1\n", "gitdir=unset\n", "gpgsign=unset\n"} {
+				if !strings.Contains(string(data), want) {
+					t.Errorf("%s child environment missing %q: %s", tc.name, want, data)
 				}
 			}
-			// ga-cesmzs: only test-local-parallel crosses a subprocess boundary
-			// (the xargs fan-out worker), so only it must export the variable.
-			if path == "scripts/test-local-parallel" {
-				if got := strings.Count(content, "\nexport gc_test_gitconfig\n"); got != 1 {
-					t.Errorf("%s must export gc_test_gitconfig for the xargs fan-out workers (found %d)", path, got)
+			global := ""
+			for _, line := range strings.Split(string(data), "\n") {
+				if value, ok := strings.CutPrefix(line, "global="); ok {
+					global = value
 				}
+			}
+			if global == "" || global == filepath.Join(home, ".gitconfig") {
+				t.Errorf("%s child global config = %q, want seeded config", tc.name, global)
 			}
 		})
-	}
-}
-
-// TestFanOutWorkerReceivesExportedGitConfigGlobal exercises the real
-// run_fan_out xargs/bash -c dispatch end to end instead of asserting on
-// source text: it extracts the live gc_test_gitconfig preamble and the
-// run_fan_out function body from the current file content and runs them
-// under a minimal synthetic harness. This catches an unexported
-// gc_test_gitconfig (ga-9t7vpl) by the worker actually failing, a class of
-// regression TestShardTestEnvsIgnoreUserGitConfiguration above cannot
-// detect since it only counts a string, not the variable's export scope.
-func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
-	repoRoot := repoRoot(t)
-	scriptPath := filepath.Join(repoRoot, "scripts", "test-local-parallel")
-	data, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", scriptPath, err)
-	}
-	content := string(data)
-
-	const assignLine = `gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"`
-	if !strings.Contains(content, assignLine) {
-		t.Fatalf("%s: gc_test_gitconfig assignment line not found (expected exact text %q)", scriptPath, assignLine)
-	}
-	preamble := assignLine
-	if strings.Contains(content, "\nexport gc_test_gitconfig\n") {
-		preamble += "\nexport gc_test_gitconfig"
-	}
-
-	const fanOutOpen = "run_fan_out() {\n"
-	startIdx := strings.Index(content, fanOutOpen)
-	if startIdx == -1 {
-		t.Fatalf("%s: run_fan_out() function not found", scriptPath)
-	}
-	bodyStart := startIdx + len(fanOutOpen)
-	endIdx := strings.Index(content[bodyStart:], "\n}\n")
-	if endIdx == -1 {
-		t.Fatalf("%s: run_fan_out() closing brace not found", scriptPath)
-	}
-	fanOutBody := content[bodyStart : bodyStart+endIdx]
-
-	logDir := t.TempDir()
-	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
-
-	lines := []string{
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		"repo_root=" + shellQuote(repoRoot),
-		preamble,
-		"run_fan_out() {",
-		fanOutBody,
-		"}",
-		`gate_fd=""`,
-		"local_jobs=1",
-		"jobspecs=('probe::" + probeCmd + "')",
-		"export LOCAL_TEST_LOG_DIR=" + shellQuote(logDir),
-		`export TEST_LOCAL_NICE=""`,
-		"export TEST_LOCAL_GOPATH=" + shellQuote(goEnvValue(t, "GOPATH")),
-		"export TEST_LOCAL_GOCACHE=" + shellQuote(goEnvValue(t, "GOCACHE")),
-		"export TEST_LOCAL_GOMODCACHE=" + shellQuote(goEnvValue(t, "GOMODCACHE")),
-		"export TEST_LOCAL_GOTMPDIR=" + shellQuote(goEnvValue(t, "GOTMPDIR")),
-		"export TEST_LOCAL_GOROOT=" + shellQuote(goEnvValue(t, "GOROOT")),
-		"set +e",
-		"run_fan_out",
-		"status=$?",
-		"set -e",
-		`exit "$status"`,
-	}
-	harnessPath := filepath.Join(t.TempDir(), "run_fan_out_harness.sh")
-	if err := os.WriteFile(harnessPath, []byte(strings.Join(lines, "\n")+"\n"), 0o755); err != nil {
-		t.Fatalf("write harness script: %v", err)
-	}
-
-	out, runErr := testCommand("bash", harnessPath).CombinedOutput()
-	probeLog := filepath.Join(logDir, "probe.log")
-	probeOut, readErr := os.ReadFile(probeLog)
-
-	if runErr != nil {
-		t.Fatalf("run_fan_out worker did not receive a usable GIT_CONFIG_GLOBAL: %v\nharness output:\n%s\nprobe log (err=%v):\n%s",
-			runErr, out, readErr, probeOut)
-	}
-	if readErr != nil {
-		t.Fatalf("read probe log %s: %v\nharness output:\n%s", probeLog, readErr, out)
-	}
-	if !strings.Contains(string(probeOut), "GIT_CONFIG_GLOBAL_OK=") {
-		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
 	}
 }

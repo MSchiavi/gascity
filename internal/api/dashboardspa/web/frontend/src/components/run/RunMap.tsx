@@ -7,6 +7,7 @@ import {
   type SourceState,
 } from 'gas-city-dashboard-shared';
 import type { BadgeSeverity } from '../../attention/compose';
+import type { RunStatusCounts } from 'gas-city-dashboard-shared/gc-supervisor';
 import { LaneCard } from './LaneCard';
 
 // Run phase-lane map (gascity-dashboard-0t6). Renders the snapshot's
@@ -25,14 +26,15 @@ interface RunMapProps {
   source: SourceState<RunSummary>;
   now: number;
   showHistory: boolean;
+  canonicalCounts?: RunStatusCounts | undefined;
   attentionSeverity?: (lane: RunLane) => BadgeSeverity | null;
 }
 
 const COUNT_LABELS: Array<[keyof RunSummary['runCounts'], string]> = [
-  ['prReview', 'PR'],
-  ['designReview', 'Design'],
-  ['bugfix', 'Bugfix'],
-  ['other', 'Other'],
+  ['prReview', 'Non-stale PR'],
+  ['designReview', 'Non-stale design'],
+  ['bugfix', 'Non-stale bugfix'],
+  ['other', 'Non-stale other'],
 ];
 
 const HISTORICAL_SECTION_ID = 'runs-historical-section';
@@ -44,11 +46,17 @@ const ACTIVE_LIST_ID = 'runs-active-list';
 // preview keeps the section ambient by default per DESIGN.md.
 const HISTORICAL_PREVIEW = 5;
 
-export function RunMap({ source, now, showHistory, attentionSeverity }: RunMapProps) {
+export function RunMap({
+  source,
+  now,
+  showHistory,
+  canonicalCounts,
+  attentionSeverity,
+}: RunMapProps) {
   if (source.status === 'error') {
     return (
       <section>
-        <CountsHeader summary={null} />
+        <CountsHeader summary={null} canonicalCounts={canonicalCounts} />
         <p className="mt-8 text-body text-fg-muted italic">
           {`Run data unavailable: ${source.error}.`}
         </p>
@@ -60,9 +68,10 @@ export function RunMap({ source, now, showHistory, attentionSeverity }: RunMapPr
 
   return (
     <section>
-      <CountsHeader summary={summary} />
+      <CountsHeader summary={summary} canonicalCounts={canonicalCounts} />
       <ActiveSection
         summary={summary}
+        canonicalCounts={canonicalCounts}
         now={now}
         {...(attentionSeverity === undefined ? {} : { attentionSeverity })}
       />
@@ -84,10 +93,12 @@ export function RunMap({ source, now, showHistory, attentionSeverity }: RunMapPr
 
 function ActiveSection({
   summary,
+  canonicalCounts,
   now,
   attentionSeverity,
 }: {
   summary: RunSummary;
+  canonicalCounts?: RunStatusCounts | undefined;
   now: number;
   attentionSeverity?: (lane: RunLane) => BadgeSeverity | null;
 }) {
@@ -109,10 +120,28 @@ function ActiveSection({
         </p>
       );
     }
+    if (summary.blockedLanes.length > 0) {
+      return (
+        <p className="mt-8 text-body text-fg-muted italic">No active lane details available.</p>
+      );
+    }
+    const openRuns = canonicalOpenRunCount(canonicalCounts);
+    if (openRuns !== undefined && openRuns > 0) {
+      return (
+        <p className="mt-8 text-body text-fg-muted italic">
+          {`${openRuns} open ${openRuns === 1 ? 'run has' : 'runs have'} no lane details in this summary.`}
+        </p>
+      );
+    }
+    if (openRuns === undefined) {
+      return (
+        <p className="mt-8 text-body text-fg-muted italic">No active lane details available.</p>
+      );
+    }
     // Distinguish "nothing at all" from "nothing active but N completed".
     const trailer = summary.totalHistorical > 0 ? ` (${summary.totalHistorical} completed.)` : '';
     return (
-      <p className="mt-8 text-body text-fg-muted italic">{`No active formula runs.${trailer}`}</p>
+      <p className="mt-8 text-body text-fg-muted italic">{`No formula runs in flight.${trailer}`}</p>
     );
   }
   const shown = expanded ? summary.lanes : summary.lanes.slice(0, MAX_VISIBLE_ACTIVE_LANES);
@@ -312,25 +341,40 @@ function HistoricalSection({
   );
 }
 
-function CountsHeader({ summary }: { summary: RunSummary | null }) {
-  // yh5i: tile labeled "Active" (was "Runs") so the denominator is
-  // self-describing — runCounts.total counts only active lanes after the
-  // split. Sub-tiles (PR / Design / Bugfix / Other) break down the active
-  // set by formula kind, matching the headline metric. Historical counts
-  // surface via the toggle button in the page header, not here.
-  const total = summary?.runCounts.total ?? 0;
+function CountsHeader({
+  summary,
+  canonicalCounts,
+}: {
+  summary: RunSummary | null;
+  canonicalCounts?: RunStatusCounts | undefined;
+}) {
+  // Census counts describe run lifecycle. The legacy summary's total and
+  // formula breakdown exclude stale lanes, even though stale cards remain
+  // visible for inspection. Keep those counts distinct from open-run counts.
+  const openRuns = canonicalOpenRunCount(canonicalCounts);
+  const nonStaleLanes = summary?.runCounts.total;
   const blocked = summary?.runCounts.blocked ?? 0;
   return (
     <header className="space-y-2">
       <div className="flex items-baseline gap-x-6 gap-y-2 flex-wrap">
-        <CountTile label="Active" value={total} tone="strong" />
+        <CountTile label="Queued" value={canonicalCounts?.pending ?? '—'} tone="strong" />
+        <CountTile label="Running" value={canonicalCounts?.active ?? '—'} tone="strong" />
+        <CountTile label="In flight" value={openRuns ?? '—'} tone="strong" />
+        <CountTile label="Non-stale lanes" value={nonStaleLanes ?? '—'} tone="muted" />
         {COUNT_LABELS.map(([key, label]) => (
-          <CountTile key={key} label={label} value={summary?.runCounts[key] ?? 0} tone="muted" />
+          <CountTile key={key} label={label} value={summary?.runCounts[key] ?? '—'} tone="muted" />
         ))}
-        {blocked > 0 && <CountTile label="Blocked" value={blocked} tone="muted" />}
+        {blocked > 0 && (
+          <CountTile label="Blocked lanes (non-stale)" value={blocked} tone="muted" />
+        )}
       </div>
     </header>
   );
+}
+
+function canonicalOpenRunCount(counts: RunStatusCounts | undefined): number | undefined {
+  if (counts === undefined) return undefined;
+  return counts.pending + counts.active + counts.waiting + counts.canceling;
 }
 
 function CountTile({
@@ -339,7 +383,7 @@ function CountTile({
   tone,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   tone: 'strong' | 'muted';
 }) {
   // tnum + tracked-uppercase label per the column-head register elsewhere on

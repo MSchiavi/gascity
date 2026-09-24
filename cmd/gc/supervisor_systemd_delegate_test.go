@@ -54,10 +54,10 @@ func installFakeDelegatedSystemctlWithUnitState(t *testing.T, exitCode int, stde
 // installFakeDelegatedSystemctlHangingVerb installs a shim whose
 // invocation of verb hangs (exec sleep) so tests can prove the CLI
 // bounds the systemctl wait. is-active probes report active; other
-// verbs succeed. Returns the path the shim records its argv into.
-func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) string {
+// verbs succeed.
+func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) {
 	t.Helper()
-	return installFakeDelegatedSystemctlHangingVerbWithUnitState(t, verb, 0)
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, verb, 0)
 }
 
 // installFakeDelegatedSystemctlHangingVerbWithUnitState is
@@ -65,7 +65,7 @@ func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) string 
 // `is-active` probes (0 = active, non-zero = inactive), so timeout tests
 // can model whether the post-timeout liveness fallback observes a late
 // start.
-func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) string {
+func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) {
 	t.Helper()
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "systemctl-args")
@@ -74,7 +74,6 @@ func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb st
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return argsFile
 }
 
 // installFakeDelegatedSystemctlHangingStartAndIsActive installs a shim
@@ -1729,15 +1728,25 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
 
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
-	argsFile := installFakeDelegatedSystemctlHangingVerb(t, "try-restart")
-	oldJob := delegatedSystemctlJobTimeout
-	delegatedSystemctlJobTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
+	var restartTimedOut atomic.Bool
+	restartCalls := 0
+	oldRestart := delegatedDriftRestartHook
+	t.Cleanup(func() { delegatedDriftRestartHook = oldRestart })
+	oldPoll := supervisorReadyPollInterval
+	supervisorReadyPollInterval = 0 // This test owns probe sequencing, not poll cadence.
+	t.Cleanup(func() { supervisorReadyPollInterval = oldPoll })
+	delegatedDriftRestartHook = func(d systemdDelegation, verb string, timeout time.Duration) error {
+		if d.Unit != "gascity-prod.service" || d.Scope != "system" || verb != "try-restart" || timeout != delegatedSystemctlJobTimeout {
+			t.Fatalf("restart arguments = (%+v, %q, %s), want delegated try-restart with configured budget", d, verb, timeout)
+		}
+		restartCalls++
+		restartTimedOut.Store(true)
+		return &delegatedSystemctlTimeoutError{args: strings.Join(d.systemctlArgs(verb), " "), timeout: timeout}
+	}
 
 	// Model a unit that replaces the supervisor binary only after the CLI's
-	// bounded try-restart wait has elapsed: once the fake systemctl has run
-	// (argsFile exists), keep serving the OLD build for the first few
-	// verification probes, then flip to the new build at the late
+	// bounded try-restart wait has elapsed: after the typed timeout, keep
+	// serving the OLD build for three verification probes, then flip at the late
 	// replacement point. A verify-once implementation would sample an early
 	// old-build probe and misreport "was not replaced"; the poll must retry
 	// past them to the replacement.
@@ -1745,7 +1754,7 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	var postTimeoutProbes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		build := "old-build-id"
-		if _, err := os.Stat(argsFile); err == nil {
+		if restartTimedOut.Load() {
 			if postTimeoutProbes.Add(1) > oldBuildProbesBeforeReplace {
 				build = "new-build-id"
 			}
@@ -1759,9 +1768,10 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	t.Cleanup(func() { supervisorAPIBaseURLHook = oldURL })
 
 	var stdout, stderr bytes.Buffer
-	start := time.Now()
 	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
-	elapsed := time.Since(start)
+	if restartCalls != 1 {
+		t.Fatalf("restart calls = %d, want 1", restartCalls)
+	}
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
@@ -1770,9 +1780,6 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	}
 	if postTimeoutProbes.Load() <= oldBuildProbesBeforeReplace {
 		t.Fatalf("verification made %d post-timeout probes; want > %d (the poll must retry past the early old-build probes to the late replacement)", postTimeoutProbes.Load(), oldBuildProbesBeforeReplace)
-	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("delegated try-restart took %s; the job timeout did not bound the systemctl invocation", elapsed)
 	}
 	if !strings.Contains(stdout.String(), " ready (") {
 		t.Errorf("stdout = %q, want ready line after verified late replacement", stdout.String())

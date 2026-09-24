@@ -2098,6 +2098,7 @@ export type OrderHistoryEntry = {
     has_output: boolean;
     labels: Array<string> | null;
     name: string;
+    outcome?: string;
     rig?: string;
     scoped_name: string;
     signal?: string;
@@ -9414,6 +9415,10 @@ export type UsageBody = {
      */
     today_by_run?: Array<UsageRunToday> | null;
     /**
+     * Number of observed run groups before the today_by_run cap; absent on older servers.
+     */
+    today_by_run_total?: number;
+    /**
      * RFC3339 time at which the aggregate was built.
      */
     updated_at: string;
@@ -9456,6 +9461,10 @@ export type UsageRunToday = {
      * Session bead id first seen for the run, when attributed.
      */
     session_id?: string;
+    /**
+     * True only when all contributing usage has a proven completed wall-clock interval; absent or false means derived rates are unavailable.
+     */
+    timing_complete?: boolean;
     /**
      * Facts for the run whose price is unknown.
      */
@@ -15034,7 +15043,12 @@ export type GetV0CityByCityNameOrdersData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Include disabled registered orders.
+         */
+        include_disabled?: boolean;
+    };
     url: '/v0/city/{cityName}/orders';
 };
 

@@ -1803,17 +1803,22 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		redactionEnv := append(os.Environ(), env...)
+		redactedOutput := execenv.RedactText(string(output), redactionEnv)
 		if err != nil {
-			redactionEnv := append(os.Environ(), env...)
 			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
-				redactedOutput := execenv.RedactText(string(output), redactionEnv)
 				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
 				// "exit status 1" alone tells nobody why. The command's own
 				// diagnostic is the answer, so put it on the event too.
 				execErrMsg += ": " + tailForOrderFailureEvent(redactedOutput)
+			}
+		}
+		if redactedOutput != "" {
+			if persistErr := front.SetOutput(trackingID, redactedOutput); persistErr != nil {
+				logDispatchError(m.stderr, "gc: order exec %s output persistence failed: %v", scoped, persistErr)
 			}
 		}
 	}
