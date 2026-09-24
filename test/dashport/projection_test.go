@@ -551,6 +551,10 @@ func TestEventsView(t *testing.T) {
 	if code := h.streamStatus(h.cityURL("/events/stream?after_seq=0")); code != http.StatusOK {
 		t.Errorf("events/stream status = %d, want 200", code)
 	}
+
+	t.Run("SSE drains on parent cancellation", func(t *testing.T) {
+		assertSeededSSEDrainsBeforeExternalShutdown(t, h, h.cityURL("/events/stream"), h.cancel)
+	})
 }
 
 // TestHealthPlaneAndBFF asserts the typed /health and the host-side /api health
@@ -606,5 +610,12 @@ func TestSameOriginInvariants(t *testing.T) {
 		if code != http.StatusForbidden {
 			t.Errorf("CSRF-less /api mutation status = %d, want 403", code)
 		}
+	})
+
+	t.Run("global SSE drains on repeated stop", func(t *testing.T) {
+		assertSeededSSEDrainsBeforeExternalShutdown(t, h, h.rootURL("/v0/events/stream"), func() {
+			h.stop()
+			h.stop()
+		})
 	})
 }
