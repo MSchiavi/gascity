@@ -25,15 +25,49 @@ import (
 // mutating verbs, so tests can model both healthy and failing systemctl
 // runs without a real systemd anywhere near the test. `is-active` probes
 // are special-cased to exit 0 (unit active) without printing stderrMsg,
-// keeping unit state independent of the mutating verb's outcome.
+// keeping unit state independent of the mutating verb's outcome. The shim
+// is warmed before return (see warmFakeDelegatedSystemctlShim).
 func installFakeDelegatedSystemctl(t *testing.T, exitCode int, stderrMsg string) string {
 	t.Helper()
 	return installFakeDelegatedSystemctlWithUnitState(t, exitCode, stderrMsg, 0)
 }
 
+// warmFakeDelegatedSystemctlShim pays a fresh shim's first-exec cost
+// outside every test's measured window. A newly-written script's first
+// exec carries trust-evaluation and page-cache latency (hundreds of ms
+// idle, seconds under gate contention); when a bounded production probe —
+// the is-active check inside delegatedUnitActive, a mutating verb under a
+// shrunk job budget — is that first exec, the cold cost lands inside the
+// bound and the probe misreads (gcy-08d: three non-hanging-shim tests saw
+// the 10s is-active probe time out and read the unit inactive under gate
+// load). The warm verb matches no special case in any shim variant, so it
+// always exits fast without hanging; removing the argv log afterward
+// restores the "never ran" initial state the exact-invocation assertions
+// depend on.
+//
+// The warm-up runs through runDelegatedSystemctlTimeout — the same
+// production exec path the tests exercise — rather than a direct
+// exec.Command, so the fixture adds no os/exec call site to the
+// resourcecensus subprocess ledger (which forbids baseline growth). Call
+// it after the shim dir is prepended to PATH so the warm exec resolves
+// the shim, not the host's systemctl. The warm result is best-effort: a
+// non-zero exit just means the shim ran (warming done) with a failure
+// exit code, while a spawn failure surfaces below — the shim echoes its
+// argv before anything else, so a missing argv log means it never ran and
+// the fixture cannot work in this environment.
+func warmFakeDelegatedSystemctlShim(t *testing.T, dir string) {
+	t.Helper()
+	d := systemdDelegation{Unit: "warmup.service", Scope: "system"}
+	_ = runDelegatedSystemctlTimeout(d, "__gc_warmup__", 0)
+	if err := os.Remove(filepath.Join(dir, "systemctl-args")); err != nil {
+		t.Fatalf("resetting fake systemctl argv log: %v; the fixture cannot run in this environment", err)
+	}
+}
+
 // installFakeDelegatedSystemctlWithUnitState is installFakeDelegatedSystemctl
 // with an explicit exit code for `is-active` probes (0 = active, non-zero
-// = inactive).
+// = inactive). The shim is warmed before return (see
+// warmFakeDelegatedSystemctlShim).
 func installFakeDelegatedSystemctlWithUnitState(t *testing.T, exitCode int, stderrMsg string, isActiveExit int) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -48,6 +82,7 @@ func installFakeDelegatedSystemctlWithUnitState(t *testing.T, exitCode int, stde
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	warmFakeDelegatedSystemctlShim(t, dir)
 	return argsFile
 }
 
@@ -64,7 +99,8 @@ func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) {
 // installFakeDelegatedSystemctlHangingVerb with an explicit exit code for
 // `is-active` probes (0 = active, non-zero = inactive), so timeout tests
 // can model whether the post-timeout liveness fallback observes a late
-// start.
+// start. The shim is warmed before return (see
+// warmFakeDelegatedSystemctlShim).
 func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -74,13 +110,15 @@ func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb st
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	warmFakeDelegatedSystemctlShim(t, dir)
 }
 
 // installFakeDelegatedSystemctlHangingStartAndIsActive installs a shim
 // whose `start` AND `is-active` invocations both hang (exec sleep), while
 // other verbs succeed. It models a wedged manager / D-Bus path: the bounded
 // `systemctl start` times out, and the post-timeout is-active liveness
-// probe would also hang without a CLI-side bound.
+// probe would also hang without a CLI-side bound. The shim is warmed
+// before return (see warmFakeDelegatedSystemctlShim).
 func installFakeDelegatedSystemctlHangingStartAndIsActive(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -90,6 +128,7 @@ func installFakeDelegatedSystemctlHangingStartAndIsActive(t *testing.T) {
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	warmFakeDelegatedSystemctlShim(t, dir)
 }
 
 // setDelegationEnvForTest configures the systemd delegation env for the
@@ -151,6 +190,56 @@ func decodeLifecycleJSONLine(t *testing.T, out string) map[string]any {
 		t.Fatalf("unmarshaling %q: %v", line, err)
 	}
 	return payload
+}
+
+// TestFakeDelegatedSystemctlInstallersLeaveNeverRanState pins the warming
+// contract: the warm-up exec inside each fake-systemctl installer must
+// leave no trace, so the argv log starts in "never ran" state and the
+// first production probe records exactly one line. Without the reset, the
+// warm run's argv line would leak into every exact-invocation assertion in
+// this file.
+func TestFakeDelegatedSystemctlInstallersLeaveNeverRanState(t *testing.T) {
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	d := systemdDelegation{Unit: "gascity-prod.service", Scope: "system"}
+	// Each installer prepends its temp dir to PATH, so the first entry
+	// locates the argv log even for the installers that return nothing.
+	shimArgsFile := func(t *testing.T) string {
+		t.Helper()
+		pathDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+		return filepath.Join(pathDir, "systemctl-args")
+	}
+	cases := []struct {
+		name        string
+		install     func(t *testing.T)
+		shrinkProbe bool
+		wantActive  bool
+	}{
+		{name: "plain", install: func(t *testing.T) { installFakeDelegatedSystemctl(t, 0, "") }, wantActive: true},
+		{name: "with unit state", install: func(t *testing.T) { installFakeDelegatedSystemctlWithUnitState(t, 4, "nope.", 3) }},
+		{name: "hanging verb", install: func(t *testing.T) { installFakeDelegatedSystemctlHangingVerb(t, "stop") }, wantActive: true},
+		{name: "hanging start and is-active", install: func(t *testing.T) { installFakeDelegatedSystemctlHangingStartAndIsActive(t) }, shrinkProbe: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.shrinkProbe {
+				oldIsActive := delegatedIsActiveTimeout
+				delegatedIsActiveTimeout = 300 * time.Millisecond
+				t.Cleanup(func() { delegatedIsActiveTimeout = oldIsActive })
+			}
+			tc.install(t)
+			argsFile := shimArgsFile(t)
+			if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+				t.Fatalf("argv log %s exists right after install; the warm-up run leaked into the recorded invocations", argsFile)
+			}
+			if active := delegatedUnitActive(d); active != tc.wantActive {
+				t.Fatalf("delegatedUnitActive() = %v, want %v", active, tc.wantActive)
+			}
+			lines := readRecordedSystemctlArgs(t, argsFile)
+			if len(lines) != 1 || lines[0] != "is-active --quiet gascity-prod.service" {
+				t.Fatalf("systemctl invocations = %v, want exactly the probe (no warm-up trace)", lines)
+			}
+		})
+	}
 }
 
 func TestSupervisorSystemdDelegationFromEnv(t *testing.T) {
