@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,80 @@ import (
 	"testing"
 	"time"
 )
+
+// TestMain raises the probe subprocess timeout for the whole package test
+// binary. The readiness tests exec real (fake-script) subprocesses, and under
+// gate load process-spawn latency can exceed the 5s production budget,
+// flaking tests with probe_error instead of configured (gcy-fq3).
+func TestMain(m *testing.M) {
+	providerProbeCommandTimeout = 30 * time.Second
+	os.Exit(m.Run())
+}
+
+// A slow-but-successful probe subprocess must still report configured under
+// the test timeout. The script sleeps past the 5s production budget, so this
+// fails if the probe timeout is ever hardcoded back to 5s.
+func TestProbeClaudeToleratesSlowSubprocess(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+/bin/sleep 6
+printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+`)
+
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	t.Cleanup(func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	})
+
+	if got := probeClaude(context.Background(), homeDir); got.status != probeStatusConfigured {
+		t.Fatalf("slow claude probe status = %q, want %q (detail %q)", got.status, probeStatusConfigured, got.detail)
+	}
+}
+
+// The probe subprocess timeout must honor providerProbeCommandTimeout: a
+// subprocess that outlives a tiny timeout reports probe_error quickly.
+func TestProbeClaudeHonorsCommandTimeout(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+/bin/sleep 30
+printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+`)
+
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	originalTimeout := providerProbeCommandTimeout
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	providerProbeCommandTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+		providerProbeCommandTimeout = originalTimeout
+	})
+
+	start := time.Now()
+	got := probeClaude(context.Background(), homeDir)
+	if got.status != probeStatusProbeError {
+		t.Fatalf("timed-out claude probe status = %q, want %q", got.status, probeStatusProbeError)
+	}
+	// 50ms timeout with a 4s bound: fails if the override is ignored (the
+	// probe would run to the multi-second package timeout instead).
+	if elapsed := time.Since(start); elapsed >= 4*time.Second {
+		t.Fatalf("timed-out claude probe took %v, want under 4s", elapsed)
+	}
+}
 
 func TestReadinessRegistrySync(t *testing.T) {
 	for item := range readinessProbeSpecs {

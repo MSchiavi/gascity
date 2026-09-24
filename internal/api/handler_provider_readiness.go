@@ -130,6 +130,11 @@ var (
 
 var providerProbeCacheTTL = 2 * time.Second
 
+// providerProbeCommandTimeout bounds one probe subprocess (claude/gh auth
+// status). Tests raise it via TestMain: under gate load even trivial process
+// spawns can exceed the production budget and flake as probe_error.
+var providerProbeCommandTimeout = 5 * time.Second
+
 type providerReadinessResponse struct {
 	Providers map[string]providerReadiness `json:"providers"`
 }
@@ -385,7 +390,7 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled, detail: "claude executable not found in probe PATH"}
 	}
 
-	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, 5*time.Second, claudeProbeCommandEnv(), path, "auth", "status", "--json")
+	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, providerProbeCommandTimeout, claudeProbeCommandEnv(), path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError, detail: "claude auth status failed before returning JSON"}
 	}
@@ -707,7 +712,7 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 	stdout, stderr, err := runProbeCommandWithEnv(
 		ctx,
 		homeDir,
-		5*time.Second,
+		providerProbeCommandTimeout,
 		gitHubCLIProbeCommandEnv(),
 		ghPath,
 		"auth",
