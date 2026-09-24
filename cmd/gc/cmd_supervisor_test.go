@@ -5112,6 +5112,22 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
+	// Warm the beads-provider stop path before starting the timer. The first
+	// exec of the newly created spy script pays hundreds of milliseconds (up
+	// to seconds under load) for first-exec trust evaluation, cached for
+	// later execs of the same file. Without this warm-up that fixture cost
+	// lands inside the timed window and fails the test on overhead, not on
+	// shutdown logic. Reset the ops log afterward so the timed run below is
+	// the only observed stop (unlike
+	// TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs, which never
+	// reads the log, this test asserts on it, so the warm-up's logged stop
+	// must be cleared).
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("warm-up shutdownBeadsProvider: %v", err)
+	}
+	if err := os.WriteFile(logFile, nil, 0o644); err != nil {
+		t.Fatalf("reset ops log after warm-up: %v", err)
+	}
 	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
