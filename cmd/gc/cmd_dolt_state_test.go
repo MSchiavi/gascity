@@ -3014,11 +3014,30 @@ esac
 	}
 }
 
+// writeFakeDoltSQLBinary installs an instant fake `dolt` script and relaxes
+// managedDoltSQLCommandTimeout for the test. The fake answers immediately,
+// so any delay reaching the timeout is process-spawn/scheduling latency under
+// parallel-gate load (observed >5s at fleet loadavg 13+, gcy-6lz) —
+// environmental noise, not the server behavior under test. The production 5s
+// timeout is restored by cleanup and stays pinned by
+// TestRunManagedDoltSQLTimesOut, which installs its own binary and timeout.
 func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	t.Helper()
+	relaxManagedDoltSQLTimeoutForFakeDolt(t)
 	script := strings.ReplaceAll(body, "$INVOCATION_FILE", invocationFile)
 	path := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
 	}
+}
+
+// relaxManagedDoltSQLTimeoutForFakeDolt swaps the production 5s SQL command
+// timeout for generous environmental slack while a test shells out to a fake
+// instant `dolt`. Callers must not use t.Parallel: the timeout is a
+// package-level var shared with every other test in cmd/gc.
+func relaxManagedDoltSQLTimeoutForFakeDolt(t *testing.T) {
+	t.Helper()
+	oldTimeout := managedDoltSQLCommandTimeout
+	managedDoltSQLCommandTimeout = time.Minute
+	t.Cleanup(func() { managedDoltSQLCommandTimeout = oldTimeout })
 }

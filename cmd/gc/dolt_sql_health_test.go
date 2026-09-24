@@ -442,6 +442,23 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 	}
 }
 
+// TestRelaxManagedDoltSQLTimeoutForFakeDoltRestores pins the gcy-6lz fix
+// contract: fake-dolt tests get environmental slack against spawn latency
+// under gate load, and the production timeout is restored afterwards so no
+// other test observes the relaxed value.
+func TestRelaxManagedDoltSQLTimeoutForFakeDoltRestores(t *testing.T) {
+	before := managedDoltSQLCommandTimeout
+	t.Run("relaxed inside", func(t *testing.T) {
+		relaxManagedDoltSQLTimeoutForFakeDolt(t)
+		if managedDoltSQLCommandTimeout != time.Minute {
+			t.Fatalf("managedDoltSQLCommandTimeout = %s, want %s", managedDoltSQLCommandTimeout, time.Minute)
+		}
+	})
+	if managedDoltSQLCommandTimeout != before {
+		t.Fatalf("managedDoltSQLCommandTimeout = %s after cleanup, want restored %s", managedDoltSQLCommandTimeout, before)
+	}
+}
+
 func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 	binDir := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
@@ -453,6 +470,9 @@ func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	// Own arg-capturing binary instead of writeFakeDoltSQLBinary, so relax
+	// the timeout explicitly (same gcy-6lz gate-load rationale).
+	relaxManagedDoltSQLTimeoutForFakeDolt(t)
 
 	if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
 		t.Fatalf("runManagedDoltSQL() error = %v", err)
