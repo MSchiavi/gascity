@@ -91,6 +91,40 @@ detect_cgroup_memory_kib() {
   cgroup_remaining_kib "$cgroup_root/memory" "$relative" memory.limit_in_bytes memory.usage_in_bytes
 }
 
+# Genuinely reclaimable memory on macOS, in KiB, from vm_stat: free +
+# inactive + speculative pages times the reported page size. Total memory
+# minus a fixed reserve oversubscribes hosts with gigabytes pinned by VMs
+# and resident daemons — the fleet mac box reports 36 GiB total with ~2 GiB
+# free, so total-based budgeting fanned the gate out into OOM (gcy-ka1f).
+# GC_TEST_LOCAL_VM_STAT_FILE reads a captured vm_stat transcript instead of
+# running vm_stat, mirroring the GC_TEST_LOCAL_MEMINFO seam.
+detect_macos_available_kib() {
+  local vmstat_file="${GC_TEST_LOCAL_VM_STAT_FILE:-}"
+  local out
+  if [[ -n "$vmstat_file" ]]; then
+    [[ -r "$vmstat_file" ]] || return 1
+    out="$(cat "$vmstat_file" 2>/dev/null)" || return 1
+  else
+    out="$(vm_stat 2>/dev/null)" || return 1
+  fi
+  local parsed
+  parsed="$(printf '%s\n' "$out" | awk '
+    /page size of [0-9]+ bytes/ {
+      for (i = 1; i <= NF; i++) if ($i == "of") { ps = $(i + 1); break }
+    }
+    /^Pages free:/ { free = $3; gsub(/\./, "", free) }
+    /^Pages inactive:/ { inactive = $3; gsub(/\./, "", inactive) }
+    /^Pages speculative:/ { spec = $3; gsub(/\./, "", spec) }
+    END {
+      if (ps ~ /^[0-9]+$/ && free ~ /^[0-9]+$/ && inactive ~ /^[0-9]+$/ && \
+          spec ~ /^[0-9]+$/ && ps > 0) {
+        printf "%d", (free + inactive + spec) * ps / 1024
+      }
+    }')" || return 1
+  [[ "$parsed" =~ ^[0-9]+$ && "$parsed" -gt 0 ]] || return 1
+  printf '%s\n' "$parsed"
+}
+
 detect_memory_kib() {
   if [[ -n "${GC_TEST_LOCAL_MEMORY_KIB+x}" ]]; then
     [[ "$GC_TEST_LOCAL_MEMORY_KIB" =~ ^[0-9]+$ ]] ||
@@ -120,8 +154,19 @@ detect_memory_kib() {
     fi
   fi
 
-  # macOS exposes total rather than readily available memory. Reserve 4 GiB
-  # for the OS and interactive work before applying the per-shard budget.
+  # macOS exposes no MemAvailable equivalent in a file. Prefer genuinely
+  # reclaimable pages from vm_stat; total-minus-reserve oversubscribes
+  # hosts with pinned memory (see detect_macos_available_kib).
+  if [[ "$best" -eq 0 ]]; then
+    candidate="$(detect_macos_available_kib || true)"
+    if [[ "$candidate" =~ ^[0-9]+$ && "$candidate" -gt 0 ]]; then
+      best="$candidate"
+    fi
+  fi
+
+  # Degraded fallback when vm_stat is unavailable: total rather than
+  # readily available memory. Reserve 4 GiB for the OS and interactive
+  # work before applying the per-shard budget.
   if [[ "$best" -eq 0 ]]; then
     total_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
     if [[ "$total_bytes" =~ ^[0-9]+$ && "$total_bytes" -gt 0 ]]; then

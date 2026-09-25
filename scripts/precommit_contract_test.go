@@ -230,6 +230,114 @@ func localTestCgroupEnv(t *testing.T, version, limit, current string) []string {
 	}
 }
 
+func TestLocalJobCountMacOSVmStatAvailableConstrainsFanout(t *testing.T) {
+	repoRoot := repoRoot(t)
+	baseEnv := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_CPUS=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMORY_KIB=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMINFO=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_PROC_CGROUP=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG_FILE=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_VM_STAT_FILE=") {
+			continue
+		}
+		baseEnv = append(baseEnv, entry)
+	}
+	tests := []struct {
+		name           string
+		cpus           string
+		vmstat         string
+		shadowSysctl   bool
+		wantJobs       string
+		wantSharedJobs string
+	}{
+		{
+			// Fleet-mac shape at 16 KiB pages: (32036 + 642906 + 3907)
+			// pages * 16 KiB = 10861584 KiB, a 2-job memory budget.
+			name: "apple silicon fleet box budgets two jobs",
+			cpus: "12",
+			vmstat: "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+				"Pages free:                               32036.\n" +
+				"Pages active:                            641562.\n" +
+				"Pages inactive:                          642906.\n" +
+				"Pages speculative:                         3907.\n" +
+				"Pages wired down:                        392207.\n",
+			wantJobs:       "2",
+			wantSharedJobs: "1",
+		},
+		{
+			// Intel 4 KiB pages with ~488 MiB reclaimable: under one
+			// 4 GiB budget, so the one-job floor holds.
+			name: "intel constrained box keeps one job",
+			cpus: "12",
+			vmstat: "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n" +
+				"Pages free:                              100000.\n" +
+				"Pages active:                            900000.\n" +
+				"Pages inactive:                           20000.\n" +
+				"Pages speculative:                         5000.\n",
+			wantJobs:       "1",
+			wantSharedJobs: "1",
+		},
+		{
+			// An unparseable transcript with no sysctl fallback lands on
+			// the unknown-memory safe default, never on total memory.
+			name:           "malformed transcript falls back to unknown memory",
+			cpus:           "64",
+			vmstat:         "not vm_stat output\n",
+			shadowSysctl:   true,
+			wantJobs:       "3",
+			wantSharedJobs: "1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			vmstatFile := filepath.Join(root, "vm_stat.txt")
+			writeTestFile(t, vmstatFile, tt.vmstat)
+			fixtureEnv := append(append([]string(nil), baseEnv...),
+				"GC_TEST_LOCAL_CPUS="+tt.cpus,
+				"GC_TEST_LOCAL_LOADAVG=0",
+				// Force the macOS probe path even on Linux CI, where
+				// /proc/meminfo would otherwise satisfy the detector.
+				"GC_TEST_LOCAL_MEMINFO="+filepath.Join(root, "missing-meminfo"),
+				"GC_TEST_LOCAL_PROC_CGROUP="+filepath.Join(root, "missing-cgroup"),
+				"GC_TEST_LOCAL_VM_STAT_FILE="+vmstatFile,
+			)
+			if tt.shadowSysctl {
+				binDir := filepath.Join(root, "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeExecutable(t, filepath.Join(binDir, "sysctl"), "#!/bin/sh\nexit 1\n")
+				path := os.Getenv("PATH")
+				fixtureEnv = append(fixtureEnv, "PATH="+binDir+string(os.PathListSeparator)+path)
+			}
+
+			detector := testCommand(filepath.Join(repoRoot, "scripts", "test-local-job-count"))
+			detector.Dir, detector.Env = repoRoot, fixtureEnv
+			rawOut, err := detector.CombinedOutput()
+			if err != nil {
+				t.Fatalf("job detector failed: %v\n%s", err, rawOut)
+			}
+			rawJobs := strings.TrimSpace(string(rawOut))
+			if rawJobs != tt.wantJobs {
+				t.Fatalf("job detector returned %q, want %q", rawJobs, tt.wantJobs)
+			}
+			budget := testCommand("bash", "-c", `source scripts/lib/inner-parallelism.sh; gc_shared_auto_jobs "$1" "$2"`, "budget", rawJobs, "2")
+			budget.Dir = repoRoot
+			sharedOut, err := budget.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(sharedOut)) != tt.wantSharedJobs {
+				t.Fatalf("shared budget = %q, err=%v; want %s", strings.TrimSpace(string(sharedOut)), err, tt.wantSharedJobs)
+			}
+		})
+	}
+}
+
 func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	f := newPrePushFixture(t)
 	writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/usr/bin/env sh

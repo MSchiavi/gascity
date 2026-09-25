@@ -627,7 +627,10 @@ make test-local-full-parallel
 
 By default, the local runners bound concurrency by both detected CPUs and
 available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
-If memory cannot be detected, they use three jobs. An explicit override always
+If memory cannot be detected, they use three jobs. On macOS the available
+figure is genuinely reclaimable pages from `vm_stat` (free + inactive +
+speculative), not total memory — total-based budgeting oversubscribes hosts
+with gigabytes pinned by VMs and resident daemons. An explicit override always
 wins:
 
 ```bash
