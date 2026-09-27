@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,8 +15,57 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestHybridProviderRoutesCanaryToConfiguredRemoteProvider(t *testing.T) {
+	p, err := newHybridProvider(config.SessionConfig{RemoteMatch: "canary", RemoteProvider: "fake"}, "city", "")
+	if err != nil {
+		t.Fatalf("newHybridProvider: %v", err)
+	}
+	h, ok := p.(*sessionhybrid.Provider)
+	if !ok {
+		t.Fatalf("provider = %T, want *hybrid.Provider", p)
+	}
+	selected := h.SelectedProvider("worker-canary")
+	if _, ok := selected.(*runtime.Fake); !ok {
+		t.Fatalf("selected remote provider = %T, want *runtime.Fake", selected)
+	}
+	if local := h.SelectedProvider("worker-ordinary"); local == selected {
+		t.Fatal("nonmatching session selected the remote provider")
+	}
+}
+
+func TestHybridProviderRejectsRecursiveRemoteProvider(t *testing.T) {
+	if _, err := newHybridProvider(config.SessionConfig{RemoteProvider: "hybrid"}, "city", ""); err == nil {
+		t.Fatal("remote_provider=hybrid unexpectedly recursed")
+	}
+	if _, err := newHybridProvider(config.SessionConfig{RemoteProvider: "misspelled-provider"}, "city", ""); err == nil {
+		t.Fatal("unknown remote_provider unexpectedly used the tmux fallback")
+	}
+}
+
+func TestHybridRemoteProviderResolvesCityPackRuntime(t *testing.T) {
+	cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"canary-runtime": {Name: "canary-runtime", Command: "/bin/true", PackName: "test-pack"},
+	}}
+	p, err := resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: "hybrid"}, config.SessionConfig{
+		RemoteMatch: "canary", RemoteProvider: "canary-runtime",
+	}, "city", "")
+	if err != nil {
+		t.Fatalf("resolve hybrid provider: %v", err)
+	}
+	h, ok := p.(*sessionhybrid.Provider)
+	if !ok {
+		t.Fatalf("provider = %T, want *hybrid.Provider", p)
+	}
+	want := sessionexec.NewSeamBacked("/bin/true")
+	if got := h.SelectedProvider("worker-canary"); reflect.TypeOf(got) != reflect.TypeOf(want) {
+		t.Fatalf("selected remote provider = %T, want pack exec backend %T", got, want)
+	}
+}
 
 func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
 	sc := config.SessionConfig{}

@@ -174,15 +174,17 @@ const (
 
 // NudgeRequest delivers a best-effort wake or redirect message.
 type NudgeRequest struct {
-	Text     string          `json:"text"`
-	Delivery NudgeDelivery   `json:"delivery,omitempty"`
-	Source   string          `json:"source,omitempty"`
-	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	Admission *runtime.AdmissionRequest `json:"admission,omitempty"`
+	Text      string                    `json:"text"`
+	Delivery  NudgeDelivery             `json:"delivery,omitempty"`
+	Source    string                    `json:"source,omitempty"`
+	Wake      NudgeWakePolicy           `json:"wake,omitempty"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
-	Delivered bool `json:"delivered"`
+	Admission *runtime.AdmissionReceipt `json:"admission,omitempty"`
+	Delivered bool                      `json:"delivered"`
 	// Undelivered names WHY a live delivery did not happen, for the callers
 	// that downgrade to the queue and have to tell a human what they did.
 	// Empty when Delivered is true, and empty for a downgrade this type does

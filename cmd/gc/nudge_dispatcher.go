@@ -139,9 +139,6 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
 	}
-	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
-		return 0, nil
-	}
 	pendingAgents := make(map[string]bool, len(state.Pending))
 	for _, item := range state.Pending {
 		if item.Agent == "" {
@@ -163,6 +160,16 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			continue
 		}
 		pendingAgents[item.Agent] = true
+	}
+	// Only receipt-capable held attempts need background queries. Legacy
+	// unconfirmed keystrokes remain visible until an operator resolves them.
+	for _, item := range state.Dead {
+		if item.Agent == "" || !nudgequeue.IsSubmission(item) {
+			continue
+		}
+		if s, err := nudgequeue.DecodeSubmission(item); err == nil && s.Attempt.ReceiptCapable {
+			pendingAgents[item.Agent] = true
+		}
 	}
 	if len(pendingAgents) == 0 {
 		return 0, nil

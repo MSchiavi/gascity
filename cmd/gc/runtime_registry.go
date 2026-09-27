@@ -89,7 +89,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return newHybridProvider(sc, cityName, cityPath)
+		return newHybridProviderWithRegistry(sc, cityName, cityPath, r)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")

@@ -74,6 +74,11 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.defaultSP
 }
 
+// SelectedProvider returns the concrete backend that would receive operations
+// for name. It exposes routing identity without adding methods to the Provider
+// interface or changing route behavior.
+func (p *Provider) SelectedProvider(name string) runtime.Provider { return p.route(name) }
+
 // SupportsTransport reports whether this provider can route the requested
 // session transport.
 func (p *Provider) SupportsTransport(transport string) bool {

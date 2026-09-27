@@ -44,6 +44,11 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.local
 }
 
+// SelectedProvider returns the concrete backend that would receive operations
+// for name. It exposes routing identity without adding methods to the Provider
+// interface or changing route behavior.
+func (p *Provider) SelectedProvider(name string) runtime.Provider { return p.route(name) }
+
 // Start delegates to the routed backend.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return p.route(name).Start(ctx, name, cfg)

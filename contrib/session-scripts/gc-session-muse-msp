@@ -1,0 +1,825 @@
+#!/usr/bin/env python3
+"""Opt-in RPP adapter. The detached host owns Muse MSP, never a terminal.
+
+GC_MUSE_MSP_DIR must name a private local directory. GC_MUSE_MSP_BIN names
+the installed Muse binary. No model provider is selected by default: set
+GC_MUSE_MSP_PROVIDER explicitly (echo for isolated transport checks).
+"""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import queue
+import secrets
+import select
+import signal
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+
+def uuid7():
+    value = (int(time.time() * 1000) << 80) | (7 << 76) | (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)
+    return str(uuid.UUID(int=value))
+
+
+def admission(result, command, session):
+    if result.get('commandId') != command or result.get('status') != 'accepted' or not isinstance(result.get('turnId'), str) or not result['turnId']:
+        raise ValueError('uncorrelated admission')
+    return {'state': 'accepted', 'command_id': command, 'provider_session_id': session,
+            'receipt_id': command, 'turn_id': result.get('turnId'), 'disposition': result.get('disposition')}
+
+
+def rejection(error, command, session):
+    data = error.get('data') or {}
+    known = data.get('kind') == 'commandRejected' and data.get('commandId') == command
+    out = {'state': 'not_admitted' if known else 'unknown', 'command_id': command,
+           'provider_session_id': session}
+    if isinstance(error.get('code'), int):
+        out['code'] = error['code']
+    if data.get('kind') in ('commandRejected', 'invalidParams', 'sessionNotFound'):
+        out['kind'] = data['kind']
+    if data.get('reason') in ('abandoned', 'session_id_conflict', 'command_id_conflict', 'cancelled', 'session_not_found', 'unsupported'):
+        out['reason'] = data['reason']
+    if data.get('commandId') == command:
+        out['commandId'] = command
+    if isinstance(data.get('retryable'), bool):
+        out['retryable'] = data['retryable']
+    return out
+
+
+def save(path, value):
+    temp = path.with_suffix('.tmp')
+    with open(temp, 'w', encoding='utf-8') as stream:
+        json.dump(value, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def private_root():
+    root = Path(os.environ['GC_MUSE_MSP_DIR']).absolute()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError('MSP directory must be owned, private, and not a symlink')
+    return root
+
+
+def directory(root, name):
+    return root / hashlib.sha256(name.encode()).hexdigest()[:24]
+
+
+def conversation_changed(state, env):
+    keys = ('GC_SESSION_ID', 'GC_CONTINUATION_EPOCH')
+    incoming = tuple(env.get(k) for k in keys)
+    previous = tuple(state.get('meta', {}).get(k) for k in keys)
+    if any(incoming) and not all(incoming):
+        raise ValueError('incomplete managed conversation identity')
+    return all(incoming) and all(previous) and incoming != previous
+
+
+def launch_options(config):
+    args = shlex.split(config.get('command') or '')
+    options = {}
+    if args:
+        if 'muse' not in Path(args.pop(0)).name:
+            raise ValueError('managed command must name Muse')
+        if args and args[0] == 'resume':
+            args.pop(0)
+            options['resume'] = True
+            if args and not args[0].startswith('-'):
+                options['session_id'] = args.pop(0)
+        fields = {'--session-id': 'session_id', '--model': 'model', '--provider': 'provider', '--reasoning-effort': 'reasoning'}
+        while args:
+            flag = args.pop(0)
+            if flag == '--':
+                options['prompt'] = ' '.join(args)
+                break
+            if flag in fields and args:
+                options[fields[flag]] = args.pop(0)
+            elif flag in ('--dangerously-skip-permissions', '--yolo'):
+                options['approval'] = 'allowAll'
+                options['disable_sandbox'] = True
+                options['trust_workspace'] = True
+            elif flag in ('--disable-sandbox', '--trust-workspace', '--disable-shell', '--disable-write'):
+                options[flag[2:].replace('-', '_')] = True
+            elif not flag.startswith('-') and not args:
+                options['prompt'] = flag
+            else:
+                raise ValueError('unsupported managed Muse command flag: ' + flag)
+    if options.get('session_id'):
+        uuid.UUID(options['session_id'])
+    return options
+
+
+def stage(config, env):
+    work = Path(config['work_dir']).resolve()
+    for entry in config.get('copy_files') or []:
+        relative = Path(entry.get('rel_dst') or Path(entry['src']).name)
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('unsafe staging destination')
+        target = work / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = Path(entry['src'])
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, target)
+    for overlay in [*(config.get('pack_overlay_dirs') or []), config.get('overlay_dir')]:
+        if overlay:
+            shutil.copytree(overlay, work, dirs_exist_ok=True)
+    for command in [*(config.get('pre_start') or []), *(config.get('session_setup') or []), config.get('session_setup_script')]:
+        if command:
+            subprocess.run(command, shell=True, cwd=work, env=env, check=True,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+
+
+def serve_argv(binary, options, env):
+    argv = [binary, 'serve']
+    for field, flag in (('disable_shell', '--disable-shell'), ('disable_write', '--disable-write'), ('disable_sandbox', '--disable-sandbox'), ('trust_workspace', '--trust-workspace')):
+        if options.get(field) or (field == 'disable_shell' and env.get('GC_MUSE_MSP_DISABLE_SHELL') == '1'):
+            argv += [flag]
+    return argv
+
+
+class Host:
+    def __init__(self, folder, config):
+        self.folder = folder
+        self.state_path = folder / 'state.json'
+        self.config = config
+        self.lock = threading.RLock()
+        self.pending = {}
+        self.counter = 0
+        self.write_lock = threading.Lock()
+        self.stopping = False
+        self.cancelled = threading.Event()
+        self.startup_complete = threading.Event()
+        def cancel_initialization(*_):
+            self.cancelled.set()
+            self.stopping = True
+            child = getattr(self, 'child', None)
+            if child is not None:
+                child.terminate()
+                try:
+                    child.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+            raise InterruptedError('owned host initialization cancelled')
+        signal.signal(signal.SIGTERM, cancel_initialization)
+        signal.signal(signal.SIGINT, cancel_initialization)
+        self.state = json.loads(self.state_path.read_text())
+        self.state['ready'] = False
+        self.state['phase'] = 'staging'
+        self.persist()
+        self.env = dict(os.environ)
+        self.env.update(config.get('env') or {})
+        if self.env.get('GC_MUSE_MSP_DATA_HOME'):
+            self.env['XDG_DATA_HOME'] = self.env['GC_MUSE_MSP_DATA_HOME']
+        binary = self.env.get('GC_MUSE_MSP_BIN')
+        provider = self.env.get('GC_MUSE_MSP_PROVIDER')
+        options = launch_options(config)
+        provider = options.get('provider', provider)
+        if not binary or not provider:
+            raise ValueError('explicit MSP binary and model provider required')
+        effective = {'provider': provider, 'model': options.get('model', self.env.get('GC_MUSE_MSP_MODEL')),
+                     'approval': options.get('approval', self.env.get('GC_MUSE_MSP_APPROVAL')),
+                     'reasoning': options.get('reasoning', self.env.get('GC_MUSE_MSP_REASONING')),
+                     'workspace': str(Path(config['work_dir']).resolve()),
+                     'disable_sandbox': bool(options.get('disable_sandbox')), 'trust_workspace': bool(options.get('trust_workspace')),
+                     'disable_shell': bool(options.get('disable_shell') or self.env.get('GC_MUSE_MSP_DISABLE_SHELL') == '1'),
+                     'disable_write': bool(options.get('disable_write'))}
+        if effective['reasoning'] is not None and effective['reasoning'] not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
+            raise ValueError('unsupported MSP reasoning tier')
+        if self.state.get('session_path') and self.state.get('effective_options') != effective:
+            raise ValueError('resume cannot change provider, model, approval, posture, or workspace')
+        with self.lock:
+            self.state['effective_options'] = effective
+            self.persist()
+        stage(config, self.env)
+        if self.startup_cancelled():
+            raise InterruptedError('startup cancelled before provider launch')
+        self.state['phase'] = 'process-start'
+        self.persist()
+        argv = serve_argv(binary, options, self.env)
+        self.child = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      cwd=config['work_dir'], env=self.env)
+        threading.Thread(target=self.stderr_tail, daemon=True).start()
+        threading.Thread(target=self.watch_startup_cancellation, daemon=True).start()
+        os.set_blocking(self.child.stdin.fileno(), False)
+        threading.Thread(target=self.read, daemon=True).start()
+        try:
+            with self.lock:
+                self.state['phase'] = 'initialize'
+                self.persist()
+            self.rpc('initialize', {'clientInfo': {'name': 'gas_city', 'version': '1'}})
+            self.write({'jsonrpc': '2.0', 'method': 'initialized'})
+            method = 'session/resume' if self.state.get('session_path') or options.get('resume') else 'session/start'
+            params = {'commandId': uuid7(), 'sessionId': self.state['provider_session_id']}
+            if method == 'session/start':
+                params.update(workspaceRoot=config['work_dir'], providerId=provider)
+                model = options.get('model', self.env.get('GC_MUSE_MSP_MODEL'))
+                if model:
+                    params['modelId'] = model
+                approval = options.get('approval', self.env.get('GC_MUSE_MSP_APPROVAL'))
+                if approval:
+                    params['approvalMode'] = approval
+            with self.lock:
+                self.state['phase'] = method
+                self.persist()
+            response = self.rpc(method, params)
+            if 'rpc_error' in response:
+                raise ValueError('MSP rejected session identity or configuration')
+            result = response['session']
+            if result['sessionId'] != self.state['provider_session_id']:
+                raise ValueError('provider changed bound session UUID')
+            launch_fence = {k: self.env.get(v) for k, v in {'session_id': 'GC_SESSION_ID', 'continuation_epoch': 'GC_CONTINUATION_EPOCH', 'runtime_token': 'GC_INSTANCE_TOKEN'}.items()}
+            with self.lock:
+                self.state.update(session_path=result['path'], ready=True)
+                self.state['phase'] = 'ready'
+                if all(launch_fence.values()):
+                    self.state['fence'] = launch_fence
+                self.persist()
+            self.reconcile()
+            starters = [('prompt', options.get('prompt')), ('nudge', config.get('nudge'))]
+            if options.get('prompt') == config.get('nudge'):
+                starters = starters[:1]
+            for kind, text in starters:
+                if not text:
+                    continue
+                if self.startup_cancelled():
+                    raise InterruptedError('startup cancelled before prompt')
+                fence = {k: self.env.get(v) for k, v in {'session_id': 'GC_SESSION_ID', 'continuation_epoch': 'GC_CONTINUATION_EPOCH', 'runtime_token': 'GC_INSTANCE_TOKEN'}.items()}
+                with self.lock:
+                    if not all(fence.values()):
+                        raise ValueError('startup prompt requires complete GC incarnation')
+                    command = self.state.setdefault('startup_commands', {}).setdefault(fence['runtime_token'] + ':' + kind, uuid7())
+                    self.persist()
+                self.admit({'command_id': command, 'provider_session_id': self.state['provider_session_id'], 'fence': fence, 'text': text})
+            for command in config.get('session_live') or []:
+                subprocess.run(command, shell=True, cwd=config['work_dir'], env=self.env, check=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            if self.startup_cancelled():
+                raise InterruptedError('startup cancelled')
+        except BaseException:
+            self.child.kill()
+            self.child.wait()
+            raise
+
+    def persist(self):
+        with self.lock:
+            save(self.state_path, self.state)
+
+    def reconcile(self, persist=True):
+        # Only the session/start response's exact bound log is consulted.
+        # Unknown attempts remain held unless a correlated terminal is proven.
+        with self.lock:
+            path = Path(self.state['session_path'])
+            for line in path.read_text().splitlines():
+                row = json.loads(line)
+                stream = row.get('stream') or {}
+                if stream.get('kind') != 'session':
+                    continue
+                if stream.get('id') != self.state['provider_session_id']:
+                    raise ValueError('bound provider log identity changed')
+                payload = row.get('payload') or {}
+                if row.get('payload_type') == 'runtime.user_intent.accepted' and row.get('durability') == 'durable':
+                    receipt = self.state['receipts'].get(payload.get('intent_id'))
+                    if receipt and payload.get('source_session_id') == self.state['provider_session_id'] and receipt['state'] == 'unknown':
+                        receipt.update(state='accepted', receipt_id=self.state['provider_session_id'] + ':' + str(row['sequence']))
+                if row.get('payload_type') == 'runtime.session':
+                    event = payload.get('event') or {}
+                    run = payload.get('run_id')
+                    if event.get('kind') == 'started':
+                        self.state['last_observed_run_id'] = run
+                        entry = {'method': 'turn/started', 'turn_id': run}
+                        if entry not in self.state['events']:
+                            self.state['events'].append(entry)
+                    if event.get('kind') == 'terminal' and event.get('terminal') in ('completed', 'failed', 'cancelled'):
+                        entry = {'method': 'turn/completed', 'turn_id': run, 'terminal': event['terminal']}
+                        if entry not in self.state['events']:
+                            self.state['events'].append(entry)
+                if row.get('payload_type') == 'runtime.user_intent.materialized':
+                    receipt = self.state['receipts'].get(payload.get('intent_id'))
+                    if receipt and payload.get('source_session_id') == self.state['provider_session_id'] and row.get('durability') == 'durable':
+                        outcome = payload.get('outcome') or {}
+                        if outcome.get('kind') == 'terminal_no_effect':
+                            receipt['terminal'] = 'terminal_no_effect'
+                        if outcome.get('kind') == 'top_level_turn_started' and outcome.get('run_id'):
+                            receipt['turn_id'] = outcome['run_id']
+                if row.get('payload_type') == 'runtime.command_intake.settled':
+                    record = payload.get('record') or {}
+                    receipt = self.state['receipts'].get(record.get('command_id'))
+                    if receipt and record.get('outcome') == 'abandoned':
+                        receipt['terminal'] = 'abandoned'
+            if persist:
+                self.persist()
+
+    def write(self, value):
+        payload = (json.dumps(value) + '\n').encode()
+        if len(payload) > 1024 * 1024:
+            raise ValueError('MSP frame exceeds bound')
+        deadline = time.monotonic() + 10
+        with self.write_lock:
+            while payload:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([], [self.child.stdin.fileno()], [], remaining)[1]:
+                    raise OSError('MSP write deadline exceeded')
+                try:
+                    written = os.write(self.child.stdin.fileno(), payload)
+                    payload = payload[written:]
+                except BlockingIOError:
+                    continue
+
+    def rpc(self, method, params):
+        self.counter += 1
+        identifier = self.counter
+        waiter = queue.Queue()
+        with self.lock:
+            self.pending[identifier] = waiter
+        try:
+            self.write({'jsonrpc': '2.0', 'id': identifier, 'method': method, 'params': params})
+            reply = waiter.get(timeout=60 if method == 'initialize' else 15)
+            if 'error' in reply:
+                error = reply['error']
+                data = error.get('data') or {}
+                with self.lock:
+                    self.state['last_rpc_error'] = {'code': error.get('code')}
+                    if data.get('kind') in ('commandRejected', 'sessionNotFound', 'invalidParams'):
+                        self.state['last_rpc_error']['kind'] = data['kind']
+                    if data.get('reason') in ('abandoned', 'session_id_conflict', 'invalid_session_id', 'invalid_command_id'):
+                        self.state['last_rpc_error']['reason'] = data['reason']
+                    self.persist()
+                return {'rpc_error': reply['error']}
+            return reply['result']
+        finally:
+            with self.lock:
+                self.pending.pop(identifier, None)
+
+    def read(self):
+        for line in self.child.stdout:
+            try:
+                message = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            self.dispatch(message)
+
+    def stderr_tail(self):
+        tail = b''
+        while True:
+            chunk = os.read(self.child.stderr.fileno(), 4096)
+            if not chunk:
+                return
+            tail = (tail + chunk)[-65536:]
+            # Raw diagnostics stay in the private host directory; never return
+            # provider messages through receipt/status or public fixtures.
+            with open(self.folder / 'child.stderr.log', 'wb') as output:
+                output.write(tail)
+
+    def watch_startup_cancellation(self):
+        while not self.startup_complete.wait(0.1):
+            try:
+                marker = json.loads((self.folder / 'cancel.json').read_text())
+            except (OSError, ValueError):
+                continue
+            if marker.get('token') != self.state['token']:
+                continue
+            self.cancelled.set()
+            self.stopping = True
+            self.child.terminate()
+            try:
+                self.child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+            with self.lock:
+                for waiter in self.pending.values():
+                    waiter.put({'error': {'code': -32800}})
+            return
+
+    def startup_cancelled(self):
+        if self.cancelled.is_set():
+            return True
+        try:
+            return json.loads((self.folder / 'cancel.json').read_text()).get('token') == self.state['token']
+        except (OSError, ValueError):
+            return False
+
+    def dispatch(self, message):
+        if 'id' in message and 'method' in message:
+            params = message.get('params') or {}
+            with self.lock:
+                self.state['blocked'] = {'reason': 'unsupported_server_request'}
+                if params.get('sessionId') == self.state['provider_session_id'] and isinstance(params.get('turnId'), str):
+                    self.state['blocked']['turn_id'] = params['turnId']
+                self.persist()
+            try:
+                self.write({'jsonrpc': '2.0', 'id': message['id'], 'error': {'code': -32601, 'message': 'Gas City managed host does not support this server request'}})
+            except (OSError, ValueError):
+                pass
+            return
+        with self.lock:
+            if 'id' in message:
+                waiter = self.pending.get(message['id'])
+                if waiter is not None:
+                    waiter.put(message)
+                else:
+                    result = message.get('result') or {}
+                    command = result.get('commandId')
+                    receipt = self.state['receipts'].get(command)
+                    if receipt and receipt['state'] == 'unknown' and result.get('status') == 'accepted':
+                        receipt.update(admission(result, command, self.state['provider_session_id']))
+                        self.persist()
+            elif message.get('method') in ('turn/started', 'turn/completed'):
+                params = message.get('params') or {}
+                if params.get('sessionId') != self.state['provider_session_id']:
+                    return
+                turn = params.get('turnId')
+                event = {'method': message['method'], 'turn_id': turn}
+                if message['method'] == 'turn/started':
+                    self.state['last_observed_run_id'] = turn
+                if message['method'] == 'turn/completed':
+                    event['terminal'] = params.get('terminal')
+                    if params.get('terminal') in ('completed', 'failed', 'cancelled') and self.state.get('blocked', {}).get('turn_id') == turn:
+                        self.state.pop('blocked', None)
+                # Store only protocol identity and outcomes, never output/model text.
+                self.state.setdefault('events', []).append(event)
+                self.persist()
+
+    def status(self):
+        with self.lock:
+            return self._status()
+
+    def _status(self):
+        events = self.state.get('events', [])
+        terminal = {e['turn_id'] for e in events if e['method'] == 'turn/completed'}
+        inflight = [cid for cid, r in self.state['receipts'].items()
+                    if r['state'] in ('unknown', 'accepted') and not r.get('terminal') and r.get('turn_id') not in terminal]
+        tracked = {r.get('turn_id') for r in self.state['receipts'].values()}
+        untracked = {e['turn_id'] for e in events if e['method'] == 'turn/started' and e['turn_id'] not in terminal and e['turn_id'] not in tracked}
+        return {'provider_session_id': self.state['provider_session_id'], 'fence': self.state.get('fence'),
+                'pending_count': len(inflight) + len(untracked) + bool(self.state.get('blocked')), 'last_command_id': self.state.get('last_command_id'),
+                'blocked': self.state.get('blocked'),
+                'last_receipt': self.receipt(self.state['last_command_id']) if self.state.get('last_command_id') else None,
+                'last_observed_run_id': self.state.get('last_observed_run_id'),
+                'events': list(events), 'ready': self.state['ready'] and self.child.poll() is None}
+
+    def receipt(self, command):
+        with self.lock:
+            return self._receipt(command)
+
+    def _receipt(self, command):
+        receipt = dict(self.state['receipts'][command])
+        for event in self.state.get('events', []):
+            if event['turn_id'] == receipt.get('turn_id'):
+                if event['method'] == 'turn/started':
+                    receipt['started'] = True
+                if event.get('terminal') in ('completed', 'failed', 'cancelled', 'abandoned', 'terminal_no_effect'):
+                    receipt['terminal'] = event['terminal']
+        return receipt
+
+    def admit(self, request, conditional=False):
+        command = request['command_id']
+        if uuid.UUID(command).version != 7:
+            raise ValueError('Muse requires a UUIDv7 command ID')
+        session = self.state['provider_session_id']
+        if request.get('provider_session_id') != session:
+            raise ValueError('provider session fence changed')
+        fence = request['fence']
+        if not all(fence.get(k) for k in ('session_id', 'continuation_epoch', 'runtime_token')):
+            raise ValueError('incomplete incarnation fence')
+        if self.state.get('fence') not in (None, fence):
+            raise ValueError('incarnation fence changed')
+        text = request['text']
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('nonempty text required')
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        previous = self.state['receipts'].get(command)
+        if previous:
+            if previous['content_sha256'] != digest or previous['fence'] != fence:
+                raise ValueError('immutable command payload changed')
+            # Uncertain attempts are never blindly resent after host/process loss.
+            return self.receipt(command)
+        if conditional:
+            self.reconcile()
+            snapshot = self.status()
+            if snapshot['pending_count'] or snapshot['last_command_id'] != request.get('expected_command_id'):
+                raise ValueError('recovery condition changed')
+            expected = self.receipt(request['expected_command_id'])
+            allowed_runs = (None, expected.get('turn_id'))
+            if expected.get('terminal') in ('terminal_no_effect', 'abandoned'):
+                allowed_runs += (expected.get('prior_run_id'),)
+            if not expected.get('terminal') or snapshot['last_observed_run_id'] not in allowed_runs:
+                raise ValueError('newer lifecycle or unknown terminal')
+        receipt = {'state': 'unknown', 'command_id': command, 'provider_session_id': session,
+                   'fence': fence, 'content_sha256': digest,
+                   'prior_run_id': self.state.get('last_observed_run_id')}
+        with self.lock:
+            self.state['fence'] = fence
+            self.state['receipts'][command] = receipt
+            self.state['last_command_id'] = command
+            self.persist()  # Admission uncertainty is durable BEFORE the possible write.
+        try:
+            params = {'commandId': command, 'sessionId': session,
+                      'input': [{'type': 'text', 'text': text}], 'ifBusy': 'queue'}
+            reasoning = self.state.get('effective_options', {}).get('reasoning')
+            if reasoning is not None:
+                params['reasoningEffort'] = reasoning
+            result = self.rpc('turn/start', params)
+            outcome = rejection(result['rpc_error'], command, session) if 'rpc_error' in result else admission(result, command, session)
+            with self.lock:
+                receipt.update(outcome)
+        except (OSError, queue.Empty, ValueError):
+            pass
+        with self.lock:
+            self.persist()
+        return self.receipt(command)
+
+    def operation(self, op, data, args):
+        if op in ('admit', 'conditional-admit'):
+            try:
+                return self.admit(data, op == 'conditional-admit')
+            except ValueError:
+                if isinstance(data, dict) and data.get('command_id') not in self.state['receipts']:
+                    # Validation failed before this new command's write gate.
+                    # A reused command with conflicting data stays uncertain.
+                    return {'state': 'not_admitted', 'command_id': data.get('command_id'),
+                            'provider_session_id': data.get('provider_session_id'),
+                            'fence': data.get('fence'), 'reason': 'local_preflight_rejected'}
+                raise
+        with self.lock:
+            return self._operation(op, data, args)
+
+    def _operation(self, op, data, args):
+        if op in ('is-running', 'process-alive', 'agent-alive'):
+            return 'true' if self.child.poll() is None else 'false'
+        if op == 'status':
+            self.reconcile()
+            return self.status()
+        if op == 'receipt':
+            uuid.UUID(data.get('provider_session_id', ''))
+            if data.get('provider_session_id') != self.state['provider_session_id']:
+                for archive in sorted((self.folder / 'history').glob(data.get('provider_session_id', '') + '.*.json'), reverse=True):
+                    state = json.loads(archive.read_text())
+                    receipt = state['receipts'].get(args[0])
+                    if receipt and data.get('command_id') == args[0] and data.get('fence') == receipt['fence'] and hashlib.sha256(data.get('text', '').encode()).hexdigest() == receipt['content_sha256']:
+                        historical = Host.__new__(Host)
+                        historical.state = state
+                        historical.lock = self.lock
+                        historical.reconcile(persist=False)
+                        return historical.receipt(args[0])
+                raise ValueError('original receipt unavailable')
+            self.reconcile()
+            receipt = self.state['receipts'].get(args[0])
+            if not receipt or data.get('command_id') != args[0] or data.get('provider_session_id') != self.state['provider_session_id'] or data.get('fence') != receipt['fence'] or hashlib.sha256(data.get('text', '').encode()).hexdigest() != receipt['content_sha256']:
+                raise ValueError('receipt fence changed')
+            return self.receipt(args[0])
+        if op == 'get-meta':
+            if args[0] in ('MUSE_SESSION_ID', 'GC_SESSION_KEY', 'session_key'):
+                return self.state['provider_session_id']
+            return self.state['meta'].get(args[0], '')
+        if op in ('set-meta', 'remove-meta'):
+            if op == 'set-meta':
+                self.state['meta'][args[0]] = data
+            else:
+                self.state['meta'].pop(args[0], None)
+            self.persist()
+            return ''
+        if op == 'peek':
+            return json.dumps(self.status())
+        if op in ('stop', 'kill'):
+            self.stopping = True
+            return ''
+        raise ValueError('unsupported MSP operation: ' + op)
+
+    def serve(self):
+        signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'stopping', True))
+        signal.signal(signal.SIGINT, lambda *_: setattr(self, 'stopping', True))
+        sock = socket.socket(socket.AF_UNIX)
+        path = self.folder / 'host.sock'
+        path.unlink(missing_ok=True)
+        sock.bind(str(path))
+        os.chmod(path, 0o600)
+        sock.listen(8)
+        sock.settimeout(1)
+        self.startup_complete.set()
+        try:
+            while not self.stopping and self.child.poll() is None:
+                try:
+                    connection, _ = sock.accept()
+                except TimeoutError:
+                    continue
+                with connection:
+                    connection.settimeout(20)
+                    stream = connection.makefile('rwb')
+                    try:
+                        raw = stream.readline(1024 * 1024)
+                        if not raw.endswith(b'\n'):
+                            raise ValueError('invalid request frame')
+                        request = json.loads(raw)
+                        if request['token'] != self.state['token']:
+                            raise ValueError('host incarnation changed')
+                        result = self.operation(request['op'], request.get('data'), request.get('args', []))
+                        response = {'result': result}
+                    except (ValueError, KeyError, OSError, TypeError):
+                        response = {'error': 'MSP operation rejected'}
+                    try:
+                        stream.write((json.dumps(response) + '\n').encode())
+                        stream.flush()
+                    except OSError:
+                        # Losing a caller never kills the owned provider or
+                        # erases a command that may already have been admitted.
+                        pass
+        finally:
+            sock.close()
+            path.unlink(missing_ok=True)
+            self.child.terminate()
+            try:
+                self.child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+                self.child.wait()
+
+
+def call(folder, op, data=None, args=None):
+    state = json.loads((folder / 'state.json').read_text())
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(20)
+        client.connect(str(folder / 'host.sock'))
+        stream = client.makefile('rwb')
+        stream.write((json.dumps({'token': state['token'], 'op': op, 'data': data, 'args': args or []}) + '\n').encode())
+        stream.flush()
+        response = json.loads(stream.readline(1024 * 1024))
+        if 'error' in response:
+            raise ValueError(response['error'])
+        return response['result']
+
+
+
+def await_stop(folder, cancel=False):
+    deadline = time.monotonic() + 5
+    with open(folder / 'lease', 'a') as lease:
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if cancel:
+                    state = json.loads((folder / 'state.json').read_text())
+                    save(folder / 'cancel.json', {'token': state['token']})
+                    cancel = False
+                time.sleep(0.05)
+    raise ValueError('owned host stop did not finish')
+
+
+def main():
+    os.umask(0o077)
+    op = sys.argv[1]
+    if op in ('nudge', 'interrupt', 'send-keys', 'attach', 'clear-scrollback', 'run-live'):
+        raise ValueError('managed MSP requires tracked command admission; terminal operation refused')
+    if op == 'get-last-activity':
+        return  # RPP's empty optional activity observation; no fabricated turn.
+    if op == 'is-attached':
+        print('false')
+        return
+    if op == 'exec':
+        # No terminal carrier exists. RPP exit 2 selects dedicated operations;
+        # admission itself NEVER uses this unsupported-operation success path.
+        sys.exit(2)
+    if op == 'protocol':
+        print(json.dumps({'version': 0, 'capabilities': ['message-admission']}))
+        return
+    root = private_root()
+    if op == '_host':
+        folder = root / sys.argv[2]
+        config = json.loads((folder / 'launch.json').read_text())
+        with open(folder / 'lease', 'a') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                Host(folder, config).serve()
+            except Exception as error:
+                state = json.loads((folder / 'state.json').read_text())
+                save(folder / 'failure.json', {'phase': state.get('phase'), 'error_type': type(error).__name__,
+                                             'rpc_error': state.get('last_rpc_error')})
+                raise
+        return
+    name = sys.argv[2]
+    folder = directory(root, name)
+    if op == 'start':
+        config = json.load(sys.stdin)
+        options = launch_options(config)
+        folder.mkdir(mode=0o700, exist_ok=True)
+        info = folder.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError('unsafe session directory')
+        with open(folder / 'lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with open(folder / 'lease', 'a') as lease:
+                try:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError('session already exists or host unavailable')
+            try:
+                if call(folder, 'is-running') == 'true':
+                    raise ValueError('session already exists')
+            except (FileNotFoundError, ConnectionRefusedError):
+                pass
+            if (folder / 'state.json').exists():
+                state = json.loads((folder / 'state.json').read_text())
+                state['token'] = secrets.token_hex(32)
+                if options.get('session_id') and options['session_id'] != state['provider_session_id']:
+                    raise ValueError('stored provider session differs from launch identity')
+                fresh = conversation_changed(state, config.get('env') or {})
+                if fresh:
+                    if options.get('resume') or options.get('session_id'):
+                        raise ValueError('explicit resume conflicts with fresh GC conversation epoch')
+                    history = folder / 'history'
+                    history.mkdir(mode=0o700, exist_ok=True)
+                    sequence = state.get('archive_sequence', 0) + 1
+                    archive = history / (state['provider_session_id'] + '.' + str(sequence).zfill(12) + '.json')
+                    if archive.exists():
+                        raise ValueError('immutable history collision')
+                    save(archive, state)
+                    state = {'name': name, 'token': secrets.token_hex(32), 'provider_session_id': uuid7(), 'receipts': {}, 'events': [], 'meta': {}, 'archive_sequence': sequence}
+            else:
+                state = {'name': name, 'token': secrets.token_hex(32), 'provider_session_id': options.get('session_id') or uuid7(), 'receipts': {}, 'events': [], 'meta': {}}
+            state['meta'].update({k: v for k, v in (config.get('env') or {}).items() if k.startswith('GC_')})
+            save(folder / 'state.json', state)
+            save(folder / 'launch.json', config)
+            def cancel_startup(*_):
+                save(folder / 'cancel.json', {'token': state['token']})
+                raise InterruptedError('MSP initialization cancelled')
+            signal.signal(signal.SIGINT, cancel_startup)
+            signal.signal(signal.SIGTERM, cancel_startup)
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_host', folder.name],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
+            deadline = time.monotonic() + 80
+            while time.monotonic() < deadline:
+                try:
+                    if call(folder, 'status')['ready']:
+                        return
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.05)
+            save(folder / 'cancel.json', {'token': state['token']})
+            raise ValueError('MSP host initialization failed')
+    if op == 'list-running':
+        for item in root.iterdir():
+            if not item.is_dir():
+                continue
+            try:
+                state = json.loads((item / 'state.json').read_text())
+                if state['name'].startswith(name) and call(item, 'is-running') == 'true':
+                    print(state['name'])
+            except (OSError, ValueError):
+                with open(item / 'lease', 'a') as lease:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        raise ValueError('MSP listing unavailable')
+                # An unavailable socket with a free lifetime lease is confirmed
+                # absent; never signal the stored PID or a reused process.
+        return
+    raw = sys.stdin.read() if op in ('admit', 'conditional-admit', 'receipt', 'set-meta') else None
+    data = json.loads(raw) if op in ('admit', 'conditional-admit', 'receipt') else raw
+    try:
+        result = call(folder, op, data, sys.argv[3:])
+    except (FileNotFoundError, ConnectionRefusedError):
+        if op in ('stop', 'kill'):
+            if folder.exists():
+                await_stop(folder, cancel=True)
+            return
+        if op in ('is-running', 'process-alive', 'agent-alive'):
+            print('false')
+            return
+        raise
+    if op in ('stop', 'kill'):
+        await_stop(folder)
+    print(json.dumps(result) if isinstance(result, (dict, list)) else result)
+
+
+def cli():
+    try:
+        main()
+        return 0
+    except (OSError, ValueError, KeyError, queue.Empty):
+        print('Muse MSP operation failed; inspect private host state', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(cli())

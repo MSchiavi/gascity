@@ -313,6 +313,9 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			h.recordInvocationTelemetry(ctx)
 		}
 	}()
+	if req.Admission != nil {
+		return admitNudge(ctx, h, req)
+	}
 
 	if strings.TrimSpace(req.Text) == "" {
 		err = fmt.Errorf("nudge text is required")

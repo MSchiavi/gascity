@@ -2753,6 +2753,7 @@ gc nudge
 | Subcommand | Description |
 |------------|-------------|
 | [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
+| [gc nudge resolve](#gc-nudge-resolve) | Resolve a quarantined submission by its exact attempt ID |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
 
 ## gc nudge drop
@@ -2777,11 +2778,32 @@ gc nudge drop <id>... [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
 
+## gc nudge resolve
+
+Resolve a possibly submitted nudge after checking the provider or making an explicit operator decision.
+
+Use --outcome delivered to record that transport delivery was verified,
+discard to abandon the reminder, or retry to authorize another submission.
+Retry may duplicate work already admitted by the provider. Admission is not
+proof of successful model execution. An immutable batch is resolved together.
+
+```
+gc nudge resolve <id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt` | string |  | Exact held attempt ID from gc nudge status |
+| `--outcome` | string |  | Operator decision: delivered, retry, or discard |
+
 ## gc nudge status
 
 Show queued and dead-letter nudges for a session.
 
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
+Unconfirmed submissions and admitted work awaiting an observed outcome are
+shown separately as blocked. They are retained without automatic resubmission.
+Use gc nudge resolve with the exact attempt ID for an operator decision.
 
 ```
 gc nudge status [session] [flags]
@@ -4194,8 +4216,11 @@ gc session new helper --no-attach
 
 Send text input to a running session via the runtime provider.
 
-The message is delivered as text content to the session's input. This is
-equivalent to typing the message into the session's terminal.
+Terminal providers deliver text to the session's input. For a managed
+provider with command receipts, use --delivery queue: admission and execution
+outcome are tracked separately. An accepted submission is retained until an
+observed terminal outcome; unconfirmed submissions are not sent again
+automatically. Inspect them with gc nudge status.
 
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.

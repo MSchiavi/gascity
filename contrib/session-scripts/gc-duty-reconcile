@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Opt-in recurring duty for explicit managed sessions; conditional admission only, never wake.
+
+Unknown enqueue outcomes remain pinned in the private state file. Resolve
+them only after inspecting the managed receipt; elapsed time is no proof.
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+import secrets
+import uuid
+
+
+def fresh(value):
+    return isinstance(value, dict) and value.get('_cache_age_s', 0) <= 5
+
+
+def skip_reason(target, row, bead, queue, host, previous, now, interval):
+    if previous.get('outcome') == 'unknown':
+        return 'prior_enqueue_unknown'
+    if previous.get('at') and now - previous['at'] < interval:
+        return 'cooldown'
+    if row.get('state') != 'active' or row.get('attached') is not False:
+        return 'inactive_or_attached'
+    metadata = bead.get('metadata') or {}
+    if bead.get('id') != row['id'] or metadata.get('provider') != target['provider']:
+        return 'provider_or_session_changed'
+    if metadata.get('state') not in ('active', 'awake'):
+        return 'inactive_or_attached'
+    for key in ('held_until', 'wait_hold', 'quarantined_until', 'sleep_intent'):
+        if metadata.get(key) not in (None, '', False, 'false', '0'):
+            return 'held'
+    if metadata.get('no_work') in (True, 'true'):
+        return 'no_work'
+    work = metadata.get(target.get('work_metadata_key', 'currently_processing_bead_id'))
+    if not work and not target.get('allow_without_work', False):
+        return 'no_work'
+    if queue.get('session_id') != row['id']:
+        return 'queue_identity_changed'
+    counts = queue.get('counts') or {}
+    if any(counts.get(key, 0) != 0 for key in ('pending', 'in_flight', 'blocked')):
+        return 'queue_pending'
+    if 'pending' not in counts or 'in_flight' not in counts:
+        return 'queue_unknown'
+    expected = {'session_id': row['id'], 'continuation_epoch': metadata.get('continuation_epoch'), 'runtime_token': metadata.get('instance_token')}
+    if not all(expected.values()) or host.get('fence') != expected or not host.get('ready') or not host.get('provider_session_id'):
+        return 'provider_identity_changed'
+    if host.get('pending_count') != 0 or host.get('blocked'):
+        return 'provider_pending'
+    receipt = host.get('last_receipt')
+    if receipt and receipt.get('terminal') not in ('completed', 'failed', 'cancelled', 'abandoned', 'terminal_no_effect'):
+        return 'provider_terminal_unknown'
+    if not receipt and host.get('last_observed_run_id'):
+        return 'provider_terminal_unknown'
+    return None
+
+
+def uuid7():
+    value = (int(time.time() * 1000) << 80) | (7 << 76) | (secrets.randbits(12) << 64) | (2 << 62) | secrets.randbits(62)
+    return str(uuid.UUID(int=value))
+
+
+def admission_ack(value, request):
+    return (all(value.get(key) == request[key] for key in ('command_id', 'provider_session_id', 'fence'))
+            and value.get('state') == 'accepted' and bool(value.get('receipt_id')))
+
+
+def save(path, state):
+    temporary = path.with_suffix('.tmp')
+    with open(temporary, 'w') as stream:
+        json.dump(state, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def run_json(argv, deadline, data=None):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('duty response budget exhausted')
+    result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL if data is None else None, input=json.dumps(data) if data is not None else None, timeout=min(20, remaining), check=True)
+    return json.loads(result.stdout)
+
+
+def reconcile(config, state, persist, query, enqueue, now):
+    interval = config.get('interval_seconds', 1800)
+    if not isinstance(interval, int) or interval < 1800:
+        raise ValueError('duty cadence must be at least 30 minutes')
+    listing = query(['session', 'list', '--json'])
+    if not fresh(listing):
+        raise ValueError('session snapshot is stale')
+    results = []
+    for target in config['targets']:
+        if not all(isinstance(target.get(k), str) and target[k].strip() for k in ('session', 'provider', 'message')):
+            raise ValueError('explicit session, managed provider, and message required')
+        matches = [row for row in listing['sessions'] if target['session'] in (row.get('id'), row.get('alias'), row.get('name'))]
+        if len(matches) != 1:
+            results.append({'target': target['session'], 'outcome': 'session_not_unique'})
+            continue
+        row = matches[0]
+        record = {'target': target['session'], 'session_id': row['id']}
+        detail = query(['beads', 'show', row['id'], '--format=json'])
+        if not fresh(detail):
+            results.append(dict(record, outcome='stale_bead'))
+            continue
+        bead = detail.get('bead', detail)
+        pending = query(['nudge', 'status', row['id'], '--json'])
+        host = query(['@msp', 'status', row['session_name']])
+        key = row['id']
+        reason = skip_reason(target, row, bead, pending, host, state.get(key, {}), now, interval)
+        if reason:
+            results.append(dict(record, outcome=reason))
+            continue
+        metadata = bead.get('metadata') or {}
+        work_id = metadata.get(target.get('work_metadata_key', 'currently_processing_bead_id'))
+        if work_id:
+            work = query(['beads', 'show', work_id, '--format=json'])
+            if not fresh(work) or work.get('bead', work).get('status') not in ('open', 'in_progress', 'hooked'):
+                results.append(dict(record, outcome='no_open_work'))
+                continue
+        # Persist immutable identity before possible provider admission.
+        request = {'command_id': uuid7(), 'provider_session_id': host['provider_session_id'],
+                   'fence': host['fence'], 'expected_command_id': host.get('last_command_id'),
+                   'text': target['message']}
+        state[key] = dict(record, at=now, outcome='unknown', request=request)
+        persist(state)
+        try:
+            acknowledgement = enqueue(['@msp', 'conditional-admit', row['session_name']], request)
+        except OSError:
+            state.pop(key)
+            persist(state)
+            results.append(dict(record, outcome='exec_failed_before_send'))
+            continue
+        except (subprocess.SubprocessError, ValueError, TimeoutError):
+            results.append(dict(record, outcome='unknown'))
+            continue
+        if not admission_ack(acknowledgement, request):
+            # A structured rejection is a known negative, never a receipt of
+            # completed work. Keep it visible without duplicating this attempt.
+            results.append(dict(record, outcome='unknown'))
+            continue
+        state[key].update(outcome='accepted', receipt=acknowledgement)
+        persist(state)
+        results.append(dict(record, outcome='accepted'))
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--state', required=True)
+    parser.add_argument('--gc', default=os.environ.get('GC_BIN', 'gc'))
+    parser.add_argument('--msp', default=str(Path(__file__).with_name('gc-session-muse-msp')))
+    parser.add_argument('--city', default=os.environ.get('GC_CITY_PATH'))
+    args = parser.parse_args()
+    os.umask(0o077)
+    path = Path(args.state).absolute()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    owner = path.parent.lstat()
+    if not stat.S_ISDIR(owner.st_mode) or owner.st_uid != os.getuid() or stat.S_IMODE(owner.st_mode) != 0o700:
+        raise ValueError('duty state directory must be private and owned')
+    config = json.loads(Path(args.config).read_text())
+    if not 0 < len(config['targets']) <= 16:
+        raise ValueError('duty target count must be between 1 and 16')
+    deadline = time.monotonic() + 50
+    prefix = [args.gc] + (['--city', args.city] if args.city else [])
+    def query(argv):
+        if argv[0] == '@msp':
+            return run_json([args.msp, *argv[1:]], deadline)
+        return run_json([*prefix, *argv], deadline)
+    with open(path.with_suffix('.lock'), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(path.read_text()) if path.exists() else {}
+        def enqueue(argv, request):
+            return run_json([args.msp, *argv[1:]], deadline, request)
+        result = reconcile(config, state, lambda value: save(path, value), query, enqueue, time.time())
+    print(json.dumps({'targets': result}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError, TimeoutError):
+        print('Duty reconciliation unavailable; no automatic retry of unknown enqueue outcomes', file=sys.stderr)
+        sys.exit(1)
