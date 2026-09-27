@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "admissionReplayPassed": true,
+  "limitation": "Acceptance and cached disposition do not prove successful or resumed execution",
+  "version": "Muse Code 1.4.0 (1.4.0-R4302.1)",
+  "sessionId": "01a0e19e-67eb-7457-94ff-ed2f2bb1c884",
+  "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+  "provider": "echo",
+  "initialReply": {
+    "status": "accepted",
+    "disposition": "started",
+    "turnId": "01a0e19e-67ec-7715-9a33-1557b19d3d03"
+  },
+  "beforeCrash": [
+    {
+      "sequence": 11,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "sourceSessionId": "01a0e19e-67eb-7457-94ff-ed2f2bb1c884",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    },
+    {
+      "sequence": 12,
+      "recordId": "6a9eb85f-1509-41aa-8c4e-1b6e0ef1bd1c",
+      "type": "runtime.session",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "event": "started",
+      "terminal": null,
+      "reason": null
+    }
+  ],
+  "resumeStatus": "idle",
+  "replayReply": {
+    "status": "accepted",
+    "disposition": "started",
+    "turnId": "01a0e19e-67ec-7715-9a33-1557b19d3d03"
+  },
+  "afterResume": [
+    {
+      "sequence": 11,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "sourceSessionId": "01a0e19e-67eb-7457-94ff-ed2f2bb1c884",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    },
+    {
+      "sequence": 12,
+      "recordId": "6a9eb85f-1509-41aa-8c4e-1b6e0ef1bd1c",
+      "type": "runtime.session",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "event": "started",
+      "terminal": null,
+      "reason": null
+    },
+    {
+      "sequence": 13,
+      "type": "session.resumed",
+      "resumedFrom": 12
+    },
+    {
+      "sequence": 14,
+      "type": "runtime.user_intent.materialized",
+      "durability": "durable",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "sourceSessionId": "01a0e19e-67eb-7457-94ff-ed2f2bb1c884",
+      "envelopeSequence": 11,
+      "outcome": "top_level_turn_started",
+      "startedRecordId": "6a9eb85f-1509-41aa-8c4e-1b6e0ef1bd1c"
+    },
+    {
+      "sequence": 15,
+      "recordId": "357a5452-ee3e-4499-a9d6-cca7b4cfdfba",
+      "type": "runtime.session",
+      "commandId": "01a0e19e-67ec-7715-9a33-1557b19d3d03",
+      "event": "terminal",
+      "terminal": "cancelled",
+      "reason": "resume_reconcile:orphaned_by_process_loss"
+    }
+  ],
+  "preCrashRunStarted": true
+}

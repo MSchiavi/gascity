@@ -1,141 +1,98 @@
 # Muse admission proof, September 2026
 
-This milestone proves a supported admission path in isolation. It does not fix
-the live Muse/tmux stall or deploy a new runtime provider.
+The isolated proof shows why Gas City must reconcile execution outcomes after
+admission. It does not fix the live Muse/tmux stall or ship a runtime adapter.
+Controller examined: `f3e4f384a`. Tested binary: Muse Code 1.4.0
+(`1.4.0-R4302.1`).
 
-The controller examined was `f3e4f384a`; the tested binary was
-Muse Code 1.4.0 (`1.4.0-R4302.1`). The refinery's current pane showed
-twelve reminders without the configured/default ready prompt. Matching live
-session identities rule against a stale-session explanation; the installed
-idle predicate refuses newer queued delivery. The pane does not prove its input
-mode, absence of active tools, or which original submit failed. Muse is outside
-the existing Claude/Codex submit-verification families. Terminal key acceptance
-therefore cannot establish durable Muse admission.
+The live refinery pane showed twelve reminders without the ready prompt.
+Matching live identities rule against a stale-session explanation; the installed
+idle predicate refuses newer queued delivery. The pane does not establish its
+input mode, absence of active tools, or which original submit failed. Muse is
+outside the Claude/Codex submit-verification families. A terminal key receipt
+cannot establish durable Muse admission.
+
+## Measured crash windows
+
+| Observed phase before crash | Retained outcome after resume/replay | Evidence and limit |
+| --- | --- | --- |
+| Actual run started | Historical start reconstructed, orphan cancelled, cached same-command reply | [Post-start fixture](../../scripts/probes/muse-msp-post-start.receipt.json); one acceptance/start in this window, no execution continuation |
+| Accepted, no run start observed | terminal_no_effect, then replay records a second acceptance under the same command ID | [Admission fixture](../../scripts/probes/muse-msp-admission.receipt.json); possible valid no-effect re-admission, no duplicate execution observed |
+| Accepted queued successor, no start observed | Command abandoned/reclaimed; exact queue item drained invisibly; replay rejected | [Queued fixture](../../scripts/probes/muse-msp-queued-crash.receipt.json); definitive rejection, not unknown transport failure |
+
+The latest admission fixture binds session
+`01a0e1b1-8c19-7a10-9e20-018dd32d8033` to command
+`01a0e1b1-8c19-7da5-9e0c-55de64a048b8`. Sequence 11 durably accepted the
+intent; no run start was observed before crash despite the reply's started
+disposition. Sequence 12 resumed; 13 materialized the original envelope as
+terminal_no_effect. Replay echoed the exact command ID; sequences 14/15
+recorded new intake/accepted settlement, and 17 another intent acceptance.
+No execution appeared in this bounded capture. The conservative one-acceptance
+assertion failed; that assertion is not the complete MSP recovery contract.
+
+The latest queued fixture binds session
+`01a0e1b1-8c35-7704-9e87-b6694e4e8017` to queued command
+`01a0e1b1-8c35-776e-82aa-94896d00231d`. Sequence 27 accepted it; 28 queued
+it on the incumbent. Restart marked its command abandoned at 30, reclaimed it
+at 31, resumed at 32, and drained the exact item at 33 with
+delivery_visible=false. Exact-command replay returned commandRejected
+(`-32030`), reason abandoned, retryable=false. No successor start was observed.
+
+The generated MSP error schema supports exact command settlement via commandId
+and reason; explicit retryable overrides the table default. This is a
+definitive rejection. The incumbent failed for missing credentials, so this
+was not a healthy busy-model crash test. It still demonstrates acceptance
+before execution requiring reconciliation. Neither case proves permanent loss,
+paid-provider crash behavior, or the cause of the live stall.
+
+A separate bounded managed-server control consumed three real-provider calls:
+distinct commands with identical input were admitted started/queued/queued,
+then each emitted turn/started and completed in order. It proves execution and
+queue drain in that control, not continuation across a crash. No additional
+real-provider calls are needed for this milestone.
 
 ## Reproduce without credentials or city input
 
 ```sh
 python3 scripts/probes/muse-msp-admission.py --binary /absolute/path/to/muse --output /tmp/muse-admission-summary.json
+python3 scripts/probes/muse-msp-admission.py --binary /absolute/path/to/muse --queued-crash --timeout 10 --output /tmp/muse-queued-crash-summary.json
+python3 -B -m unittest discover -s scripts/probes -p 'test_muse_msp_admission.py'
 ```
 
-The standard-library probe launches only its own `muse serve --disable-shell`
-children with isolated HOME, workspace, XDG config/data/state, and temporary
-files. Its environment allowlist excludes inherited GC/BEADS routing and model
-credentials. It requests the echo provider; there is no paid-provider option.
-This zero-cost reproduction tests admission only: echo run configuration may
-fail, and no successful model execution is required or claimed.
-It records the installed version and sanitized IDs/event outcomes, then removes
-raw logs. Do not point its output at an existing valuable file. This is an
-explicit process/crash probe, not part of the fast test baseline.
+The standard-library probe owns only direct child processes and disposable
+HOME/workspace/XDG state. Its environment excludes credentials and GC/BEADS
+routing; echo is the only provider choice. Echo execution may fail configuration:
+the zero-cost probe tests admission, not successful model work. Raw logs are
+deleted; sanitized IDs/outcomes survive. Choose a new output file.
 
-The client reads newline frames with binary `os.read`. Combining TextIO reads
-with `select` previously hid an already-buffered response and produced a false
-session/start timeout. Each process has its own buffer and each response wait
-has an absolute deadline. Stderr is discarded so an undrained pipe cannot block the
-host. Cleanup kills only direct children started by the probe.
-Use the demonstrated initialize client name `gc_receipt_probe`: the initial
-reproducer's hyphenated name was rejected with MSP error `-32602`.
+Binary newline framing avoids the TextIO/select buffering pitfall. Each
+response wait has an absolute deadline; tiny stdin writes are outside it.
+Stderr cannot block an undrained pipe. Initialized notifications omit params.
+Responses are paired with submitted commands regardless of arrival order;
+distinct turn identities are rejected as outside this bounded proof, never
+reused as command IDs. Error summaries preserve allowlisted kinds/reasons,
+UUID command IDs, and boolean retry flags, excluding arbitrary message/detail
+text. Offline tests cover identity selection and diagnostic filtering.
 
-## Measured crash result
+The crash phase is measured from durable run events, not RPC disposition.
+The historical post-start fixture predates echoed-command capture; its exact
+stream linkage supports that bounded observation, not general RPC correlation.
+The latest fixtures retain echoed command IDs. Each scenario replays once and
+exits nonzero when its conservative assertion fails or the required window is
+not reached. Nonzero is evidence for review, not provider corruption.
 
-The checked-in receipt uses session
-`01a0e19e-67eb-7457-94ff-ed2f2bb1c884` and command/intent/run
-`01a0e19e-67ec-7715-9a33-1557b19d3d03`. Its captured event summaries show:
+## Remaining integration proof
 
-- Sequence 11: durable acceptance of that intent in that session.
-- Sequence 12: the same run started before the host was killed.
-- Sequence 13: replacement host resumed from sequence 12.
-- Sequence 14: materialization linked acceptance at 11 to the existing start
-  record at 12; it did not start another run after restart.
-- Sequence 15: the run ended cancelled with
-  `resume_reconcile:orphaned_by_process_loss`.
+Prove reconciliation for accepted-but-unstarted, terminal_no_effect, abandoned,
+cancelled, and rejected commands before production acknowledgement. Persist the
+exact attempt before admission and bind receipts to provider UUID plus Gas City
+incarnation. Retain unknown attempts across lease expiry, TTL, supersession,
+withdrawal, and restart; keep proven pre-send failures retryable. Test ack-write
+failure, identical bodies, stale outcomes, and manual drop. Old binaries may
+ignore new retention fields, so versioned state rejection or tested quarantine
+is a rollback gate.
 
-Reissuing the same command returned the original turn ID and cached
-accepted/started disposition. Only one acceptance and one start were recorded.
-A separate admission probe distinguished identical prompt bodies by different
-command IDs. The final bounded managed-server control used three real-provider
-calls, all with identical harmless input and distinct command UUIDs. Its
-admission replies were started, queued, queued. Each turn then emitted
-turn/started and completed in order. In the exact session stream, accepted
-intents appeared at sequences 23, 24, 26, materialization at 29, 91, 145, and
-completed terminals at 86, 140, 194. This establishes that managed MSP can
-execute and drain a queue without another nudge under those tested conditions;
-it does not establish continuation across a crash. No more real-provider calls
-are needed for this milestone.
-
-Thus admission survives this tested process replacement and replay is deduped.
-The accepted reply is neither a fresh execution receipt nor successful work.
-An accepted-but-not-started or cancelled duty must remain observable and reach
-explicit reconciliation. No blanket guarantee follows for crashes before
-acceptance, lost responses, busy queues, different payloads reusing one ID, or
-all Muse versions. The committed credential-free reproduction also passed with
-the same binary; its sanitized result is in
-[`muse-msp-admission.receipt.json`](../../scripts/probes/muse-msp-admission.receipt.json).
-These proofs are not production rollout evidence for a Gas City adapter.
-
-## Queued-crash gate failed
-
-The started-crash reproduction covers a narrower window than acceptance before
-execution. A separate zero-cost queued-successor test exposed an unresolved
-case on the same binary. Its sanitized
-[`queued-crash receipt`](../../scripts/probes/muse-msp-queued-crash.receipt.json)
-binds session `01a0e1a2-d3f1-7559-9394-9b91224db551` to actual queued command
-`01a0e1a2-d3f1-7559-9394-9b923c7e42e1`:
-
-- Sequence 27 durably accepted the successor with after-current-terminal
-  delivery; sequence 28 queued its item on the incumbent run.
-- After process replacement, sequence 30 marked its command abandoned because
-  no command outcome was committed; sequence 31 reclaimed the queued turn.
-- Sequence 33 drained that exact queue item with delivery_visible=false.
-- A further resume was idle. Replaying the actual queued command timed out
-  while the server stayed alive; no new command event, materialization, or
-  successor start appeared through sequence 34.
-
-The incumbent had failed for missing credentials before successor acceptance.
-That does not negate the durable accepted-but-unstarted successor. This is a
-bounded failure observation, not proof of permanent loss, paid-provider
-behavior, or the cause of the original live stall. It blocks treating every
-accepted envelope as a proven recoverable obligation.
-The from-scratch checked-in probe reached the same queued admission window but
-its one replay returned MSP error `-32030` rather than timing out. Both negative
-observations are retained in the fixture; neither establishes permanent loss.
-
-To attempt the same window without credentials:
-
-```sh
-python3 scripts/probes/muse-msp-admission.py --binary /absolute/path/to/muse --queued-crash --output /tmp/muse-queued-crash-summary.json
-```
-
-The probe sends two distinct command IDs, selects the reply actually marked
-queued regardless of RPC order, kills its own host, resumes, and replays that
-queued command once. It exits nonzero for timeout, absent materialization, or
-failure to reach the intended queue window. No automatic retry or real-provider
-option is supplied. Fix the provider's command-commit/reclaim contract and
-repeat this gate before implementing production admission acknowledgement.
-
-## Queue and rollback gates
-
-An isolated queue prototype reproduced lease replay and TTL deletion of an
-uncertain attempt. Retention also needs coverage for supersession, wait
-withdrawal, manual drop, stale receipts, identical bodies, and ack-write failure.
-These findings are proof requirements, not shipped runtime behavior.
-
-A future sender must persist the exact attempt before possible admission.
-Unknown delivery must survive lease expiry, TTL, and controller restart without
-automatic paste. Proven pre-send failure must remain retryable. Receipts must
-match the immutable command, provider session UUID, and Gas City incarnation;
-timestamp, PID, or prompt text alone is insufficient. Acknowledging admission
-must preserve a separate record for eventual execution/terminal reconciliation.
-An old binary that ignores new retention fields can replay them: versioned
-state rejection or a tested quarantine/migration is required before rollback.
-
-## Next implementation slice
-
-Prove a concrete managed Muse provider's launch/resume and execution contract
-against the same isolated fixture, including response loss, queued admission,
-and cancellation recovery. Then implement its admission path behind the
-existing worker boundary with persisted identities and one command per attempt.
-Keep tmux the default. Do not add a generic admission interface, unused client,
-or wrapper hierarchy before a real consumer exists. Recurring duty scheduling
-must distinguish admission from execution and invoke reconciliation after a
-failed/cancelled run; waking a live process is insufficient.
+Implement one concrete managed-provider consumer behind the existing worker
+boundary after these cases pass. Keep tmux the default; add no dormant generic
+interfaces or role-specific Go logic. Recurring duties need explicit
+reconciliation after failed/no-effect runs; waking a live process is insufficient.

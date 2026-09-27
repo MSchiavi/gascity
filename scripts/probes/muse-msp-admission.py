@@ -14,6 +14,50 @@ import time
 import uuid
 
 
+class RPCError(RuntimeError):
+    """Retain protocol semantics without arbitrary provider message/detail text."""
+
+    def __init__(self, method, error):
+        code = error.get("code")
+        code = code if isinstance(code, int) else None
+        self.fields = {"code": code}
+        data = error.get("data")
+        if isinstance(data, dict):
+            if data.get("kind") in ("commandRejected", "backpressured", "invalidParams",
+                                     "sessionNotLoaded", "sessionStreamMismatch"):
+                self.fields["kind"] = data["kind"]
+            if data.get("reason") in ("abandoned", "missing_run", "session_id_conflict"):
+                self.fields["reason"] = data["reason"]
+            try:
+                self.fields["commandId"] = str(uuid.UUID(data["commandId"]))
+            except (KeyError, ValueError, TypeError, AttributeError):
+                pass
+            if isinstance(data.get("retryable"), bool):
+                self.fields["retryable"] = data["retryable"]
+        super().__init__(f"MSP {method} error code {code}")
+
+
+def correlate_admission(result, submitted_command_id):
+    """This bounded proof supports direct command-to-turn correlation only."""
+    if result.get("commandId") != submitted_command_id:
+        raise RuntimeError("MSP admission echoed a different command ID")
+    if result.get("turnId") != submitted_command_id:
+        raise RuntimeError("MSP distinct turn identity is outside this proof")
+    return result
+
+
+def queued_admission(replies):
+    """Select by immutable submitted command ID, never by returned turn ID."""
+    queued = []
+    for command_id, result in replies:
+        correlate_admission(result, command_id)
+        if result.get("disposition") == "queued":
+            queued.append((command_id, result))
+    if len(queued) != 1:
+        raise RuntimeError("queued crash window not reached")
+    return queued[0]
+
+
 def uuid7():
     """Generate the session/command UUID version accepted by Muse."""
     return str(uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76)
@@ -53,9 +97,7 @@ class Host:
             if request_id in self.responses:
                 frame = self.responses.pop(request_id)
                 if "error" in frame:
-                    code = frame["error"].get("code")
-                    code = code if isinstance(code, int) else "invalid"
-                    raise RuntimeError(f"MSP {method} error code {code}")
+                    raise RPCError(method, frame["error"])
                 return frame["result"]
             while b"\n" not in self.buffer:
                 remaining = deadline - time.monotonic()
@@ -77,9 +119,7 @@ class Host:
                     raise TimeoutError(f"MSP {method} response timed out")
                 continue
             if "error" in frame:
-                code = frame["error"].get("code")
-                code = code if isinstance(code, int) else "invalid"
-                raise RuntimeError(f"MSP {method} error code {code}")
+                raise RPCError(method, frame["error"])
             return frame["result"]
 
     def initialize(self):
@@ -179,20 +219,20 @@ def probe(binary, timeout, summary, queued_crash=False):
                 first.send("turn/start", params, 3)
                 first.send("turn/start", other, 4)
                 results = [first.response("turn/start", 3), first.response("turn/start", 4)]
-                summary["concurrentReplies"] = [{k: r.get(k) for k in ("status", "disposition", "turnId")} for r in results]
-                queued = [r for r in results if r.get("disposition") == "queued"]
-                if len(queued) != 1:
-                    raise RuntimeError("queued crash window not reached")
-                result = queued[0]
-                if result.get("turnId") not in (command_id, other_id):
-                    raise RuntimeError("queued reply changed command identity")
-                command_id = result["turnId"]
+                summary["concurrentReplies"] = [dict({k: r.get(k) for k in ("status", "disposition", "commandId", "turnId")}, submittedCommandId=cid)
+                                                 for cid, r in zip((command_id, other_id), results)]
+                command_id, result = queued_admission(list(zip((command_id, other_id), results)))
                 params["commandId"] = command_id
                 summary["commandId"] = command_id
             else:
                 result = first.request("turn/start", params, 3)
-            summary["initialReply"] = {k: result.get(k) for k in ("status", "disposition", "turnId")}
+                correlate_admission(result, command_id)
+            summary["initialReply"] = {k: result.get(k) for k in ("status", "disposition", "commandId", "turnId")}
             summary["beforeCrash"] = events(log, session_id, command_id)
+            summary["observedCrashPhase"] = "run-started" if any(
+                e.get("event") == "started" and e.get("runId") == command_id
+                for e in summary["beforeCrash"]) else "accepted-before-observed-start"
+            summary["preCrashRunStarted"] = summary["observedCrashPhase"] == "run-started"
             if queued_crash and any((e.get("event") == "started" and e.get("runId") == command_id)
                                     or e.get("outcome") == "top_level_turn_started"
                                     for e in summary["beforeCrash"]):
@@ -223,7 +263,8 @@ def probe(binary, timeout, summary, queued_crash=False):
                 summary["processAliveAfterReplayFailure"] = second.proc.poll() is None
                 summary["afterResume"] = events(log, session_id, command_id)
                 raise
-            summary["replayReply"] = {k: replay.get(k) for k in ("status", "disposition", "turnId")}
+            correlate_admission(replay, command_id)
+            summary["replayReply"] = {k: replay.get(k) for k in ("status", "disposition", "commandId", "turnId")}
         finally:
             second.kill()
         summary["afterResume"] = events(log, session_id, command_id)
@@ -254,11 +295,13 @@ def main():
                "limitation": "Acceptance and cached disposition do not prove successful or resumed execution"}
     failed = False
     try:
-        summary["scenario"] = "queued-crash" if args.queued_crash else "started-crash"
+        summary["scenario"] = "queued-crash" if args.queued_crash else "admission-crash"
         probe(binary, args.timeout, summary, args.queued_crash)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
         failed = True
         summary["errorType"] = type(exc).__name__
+        if isinstance(exc, RPCError):
+            summary["rpcError"] = exc.fields
         if isinstance(exc, (RuntimeError, TimeoutError)):
             # These exceptions carry only fixed probe diagnostics or method/code.
             summary["error"] = str(exc)
