@@ -2899,7 +2899,12 @@
         },
         "remote_match": {
           "type": "string",
-          "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote (K8s) backend. Sessions whose names contain\nthis pattern go to K8s; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+          "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote backend. Sessions whose names contain this\npattern use RemoteProvider; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+        },
+        "remote_provider": {
+          "type": "string",
+          "description": "RemoteProvider selects the hybrid provider's remote backend. Empty\nretains the historical Kubernetes backend.",
+          "default": "k8s"
         }
       },
       "additionalProperties": false,

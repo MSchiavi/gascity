@@ -870,6 +870,23 @@ name = "mayor"
 	}
 }
 
+func TestParseSessionRemoteProvider(t *testing.T) {
+	cfg, err := Parse([]byte(`[workspace]
+name = "test-city"
+
+[session]
+provider = "hybrid"
+remote_match = "worker-canary"
+remote_provider = "exec:/opt/gc-session-muse-msp"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Session.RemoteProvider != "exec:/opt/gc-session-muse-msp" {
+		t.Fatalf("Session.RemoteProvider = %q, want configured exec provider", cfg.Session.RemoteProvider)
+	}
+}
+
 func TestParseNoSessionSection(t *testing.T) {
 	data := []byte(`
 [workspace]

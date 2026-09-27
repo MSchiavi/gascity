@@ -23,7 +23,13 @@ import (
 // runtimeRegistryForCity — this registry itself is never mutated after
 // construction. The behavior contract for selection lives in
 // internal/runtime/REQUIREMENTS.md (RUNTIME-SEL rows).
-var runtimeRegistry = buildRuntimeRegistry()
+var runtimeRegistry *registry.Registry
+
+func init() {
+	// Hybrid factories resolve other builtins, which would form a variable
+	// initialization cycle if this call were in the declaration above.
+	runtimeRegistry = buildRuntimeRegistry()
+}
 
 // buildRuntimeRegistry registers the builtin runtime providers. Each
 // registration mirrors one arm of the pre-registry selection switch;

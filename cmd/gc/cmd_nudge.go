@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -124,6 +126,10 @@ var (
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
+	nudgeWorkerHandleForTarget               = workerHandleForNudgeTarget
+	nudgeSupportsAdmission                   = worker.SupportsNudgeAdmission
+	nudgeReadReceipt                         = worker.ReadNudgeReceipt
+	nudgeAdmissionTarget                     = worker.NudgeAdmissionTarget
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
@@ -155,16 +161,17 @@ type nudgeTarget struct {
 }
 
 type nudgeStatusJSON struct {
-	SchemaVersion string            `json:"schema_version"`
-	Command       string            `json:"command"`
-	CityPath      string            `json:"city_path"`
-	Agent         string            `json:"agent"`
-	Session       string            `json:"session"`
-	SessionID     string            `json:"session_id,omitempty"`
-	Counts        nudgeStatusCounts `json:"counts"`
-	Pending       []queuedNudge     `json:"pending"`
-	InFlight      []queuedNudge     `json:"in_flight"`
-	Dead          []queuedNudge     `json:"dead"`
+	SchemaVersion string                   `json:"schema_version"`
+	Command       string                   `json:"command"`
+	CityPath      string                   `json:"city_path"`
+	Agent         string                   `json:"agent"`
+	Session       string                   `json:"session"`
+	SessionID     string                   `json:"session_id,omitempty"`
+	Counts        nudgeStatusCounts        `json:"counts"`
+	Pending       []queuedNudge            `json:"pending"`
+	InFlight      []queuedNudge            `json:"in_flight"`
+	Dead          []queuedNudge            `json:"dead"`
+	Blocked       []nudgeBlockedSubmission `json:"blocked,omitempty"`
 
 	// DispatchSkips is the dispatch tick's running, city-wide (not
 	// agent-scoped) count of silent skips by reason, since the queue state
@@ -177,6 +184,34 @@ type nudgeStatusCounts struct {
 	Pending  int `json:"pending"`
 	InFlight int `json:"in_flight"`
 	Dead     int `json:"dead"`
+	Blocked  int `json:"blocked,omitempty"`
+}
+
+type nudgeBlockedSubmission struct {
+	NudgeID    string                `json:"nudge_id"`
+	State      string                `json:"state"`
+	Submission nudgequeue.Submission `json:"submission"`
+}
+
+func splitBlockedNudgeSubmissions(items []queuedNudge) ([]queuedNudge, []nudgeBlockedSubmission) {
+	var dead []queuedNudge
+	var blocked []nudgeBlockedSubmission
+	for _, item := range items {
+		if !nudgequeue.IsSubmission(item) {
+			dead = append(dead, item)
+			continue
+		}
+		s, err := nudgequeue.DecodeSubmission(item)
+		if err != nil {
+			s.Reason = err.Error()
+		}
+		state := "submission_unconfirmed"
+		if s.Admission == "accepted" {
+			state = "admitted_awaiting_outcome"
+		}
+		blocked = append(blocked, nudgeBlockedSubmission{NudgeID: item.ID, State: state, Submission: s})
+	}
+	return dead, blocked
 }
 
 func (t nudgeTarget) agentKey() string {
@@ -283,6 +318,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 		newNudgeDrainCmd(stdout, stderr),
 		newNudgePollCmd(stdout, stderr),
 		newNudgeDropCmd(stdout, stderr),
+		newNudgeResolveCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -294,7 +330,10 @@ func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show queued and dead-letter nudges for a session",
 		Long: `Show queued and dead-letter nudges for a session.
 
-Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
+Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
+Unconfirmed submissions and admitted work awaiting an observed outcome are
+shown separately as blocked. They are retained without automatic resubmission.
+Use gc nudge resolve with the exact attempt ID for an operator decision.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdNudgeStatus(args, jsonOutput, stdout, stderr) != 0 {
@@ -379,6 +418,80 @@ selection.`,
 	return cmd
 }
 
+func newNudgeResolveCmd(stdout, stderr io.Writer) *cobra.Command {
+	var attemptID, outcome string
+	cmd := &cobra.Command{
+		Use: "resolve <id>", Short: "Resolve a quarantined submission by its exact attempt ID",
+		Long: `Resolve a possibly submitted nudge after checking the provider or making an explicit operator decision.
+
+Use --outcome delivered to record that transport delivery was verified,
+discard to abandon the reminder, or retry to authorize another submission.
+Retry may duplicate work already admitted by the provider. Admission is not
+proof of successful model execution. An immutable batch is resolved together.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if attemptID == "" || outcome != "delivered" && outcome != "discard" && outcome != "retry" {
+				return errors.New("requires --attempt and --outcome delivered|retry|discard")
+			}
+			cityPath, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			if outcome == "retry" {
+				fmt.Fprintln(stderr, "Warning: retry may duplicate an already admitted submission; resolving authorizes another send.") //nolint:errcheck
+			}
+			if err := doNudgeResolve(cityPath, args[0], attemptID, outcome); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "Submission %s resolved as %s.\n", attemptID, outcome) //nolint:errcheck
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&attemptID, "attempt", "", "Exact held attempt ID from gc nudge status")
+	cmd.Flags().StringVar(&outcome, "outcome", "", "Operator decision: delivered, retry, or discard")
+	return cmd
+}
+
+// Queue state is authoritative under its shared flock, like gc nudge drop;
+// no live runtime is touched and a matching entire attempt must still exist.
+func doNudgeResolve(cityPath, id, attemptID, outcome string) error {
+	if outcome != "retry" && outcome != "discard" && outcome != "delivered" {
+		return fmt.Errorf("invalid resolution outcome %q", outcome)
+	}
+	var store beads.Store
+	if outcome != "retry" {
+		handle, err := openNudgeBeadStoreErr(cityPath)
+		if err != nil {
+			return err
+		}
+		store = handle.Store
+		defer closeBeadStoreHandle(store) //nolint:errcheck
+	}
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		for _, item := range state.Dead {
+			if item.ID != id {
+				continue
+			}
+			s, err := nudgequeue.DecodeSubmission(item)
+			if err != nil {
+				return err
+			}
+			if s.Attempt.ID != attemptID {
+				return nudgequeue.ErrSubmissionUnconfirmed
+			}
+			terminal := "injected"
+			if outcome == "discard" {
+				terminal = "failed"
+			}
+			if outcome == "retry" {
+				terminal = "retry"
+			}
+			return finishQueuedNudgeSubmission(state, store, s.Attempt, terminal, "operator resolved as "+outcome, "operator-resolution")
+		}
+		return fmt.Errorf("held nudge %q not found", id)
+	})
+}
+
 func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
@@ -397,12 +510,12 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
-
 	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	dead, blocked := splitBlockedNudgeSubmissions(dead)
 
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
 	// dispatch tick, read directly off the persisted queue state — a raw
@@ -426,10 +539,12 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 				Pending:  len(pending),
 				InFlight: len(inFlight),
 				Dead:     len(dead),
+				Blocked:  len(blocked),
 			},
 			Pending:       nonNilQueuedNudges(pending),
 			InFlight:      nonNilQueuedNudges(inFlight),
 			Dead:          nonNilQueuedNudges(dead),
+			Blocked:       blocked,
 			DispatchSkips: dispatchSkips,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc nudge status: writing JSON: %v\n", err) //nolint:errcheck
@@ -464,6 +579,13 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 			_, _ = fmt.Fprintf(stdout, "dead     %s  reason=%s  source=%s  %s\n",
 				item.ID, deadReason(item), item.Source, item.Message)
 		}
+	}
+	if len(blocked) > 0 {
+		fmt.Fprintln(stdout) //nolint:errcheck
+		for _, item := range blocked {
+			_, _ = fmt.Fprintf(stdout, "blocked  %s  state=%s  attempt=%s  reason=%s\n", item.NudgeID, item.State, item.Submission.Attempt.ID, item.Submission.Reason)
+		}
+		fmt.Fprintln(stdout, "Resolve with gc nudge resolve <id> --attempt <attempt> --outcome delivered|retry|discard. Retry may duplicate an admitted submission.") //nolint:errcheck
 	}
 	if len(dispatchSkips) > 0 {
 		fmt.Fprintln(stdout, "")                                                         //nolint:errcheck
@@ -1095,14 +1217,32 @@ func nudgePollTargetHasDueWork(target nudgeTarget, now time.Time) bool {
 		}
 		return true
 	}
+	for _, item := range state.Dead {
+		if !target.matchesQueueAgent(item.Agent) || !nudgequeue.IsSubmission(item) {
+			continue
+		}
+		if s, err := nudgequeue.DecodeSubmission(item); err == nil && s.Attempt.ReceiptCapable {
+			return true
+		}
+	}
 	return false
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
 	// Lock-free read (ga-2kzci3 FR5): this is a liveness check, not a
 	// maintenance operation, and must not wait on the queue's writer lock.
-	pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
-	if err != nil || (len(pending) == 0 && len(inFlight) == 0) {
+	pending, inFlight, dead, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+	if err != nil {
+		return false
+	}
+	work := len(pending) > 0 || len(inFlight) > 0
+	for _, item := range dead {
+		if s, err := nudgequeue.DecodeSubmission(item); err == nil && s.Attempt.ReceiptCapable {
+			work = true
+			break
+		}
+	}
+	if !work {
 		return false
 	}
 	if missingSince.IsZero() {
@@ -1373,6 +1513,11 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 			nil,
 		)
 		if err == nil {
+			// Receipt-capable delivery must validate the durable GC session
+			// incarnation through its manager before submission.
+			if target.sessionID != "" && nudgeSupportsAdmission(handle) {
+				return workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
+			}
 			return handle, nil
 		}
 		if target.sessionID == "" || !errors.Is(err, runtime.ErrSessionNotFound) {
@@ -1769,7 +1914,29 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if err != nil || !matches {
 		return false, err
 	}
-	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
+	handleSessStore := sessStore
+	if handleSessStore == nil {
+		handleSessStore = cliSessionStore(store, target.cfg, target.cityPath)
+	}
+	handle, err := nudgeWorkerHandleForTarget(target, handleSessStore, sp)
+	if err != nil {
+		return false, err
+	}
+	managedAdmission := nudgeSupportsAdmission(handle)
+	var admissionTarget *runtime.AdmissionTarget
+	if managedAdmission {
+		resolved, err := nudgeAdmissionTarget(context.Background(), handle)
+		if err != nil {
+			return false, err
+		}
+		admissionTarget = &resolved
+	}
+	if managedAdmission {
+		if err := reconcileQueuedNudgeSubmissions(target, handle, store); err != nil {
+			return false, err
+		}
+	}
+	if !managedAdmission && !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -1789,10 +1956,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	// test corner), fall back to the pre-split derivation so the handle
 	// (nil -> runtime-only) and the stamp/split (from the fallback-opened store) stay
 	// byte-identical. Identity today.
-	handleSessStore := sessStore
 	deliverySessStore := sessStore
 	if sessStore == nil {
-		handleSessStore = cliSessionStore(store, target.cfg, target.cityPath)
 		deliverySessStore = cliSessionStore(deliveryStore, target.cfg, target.cityPath)
 	}
 	var deliverySessFront *session.Store
@@ -1835,21 +2000,35 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	} else {
 		msg = formatNudgeInjectOutput(items)
 	}
-	handle, err := workerHandleForNudgeTarget(target, handleSessStore, sp)
+	attempt, err := beginQueuedNudgeSubmission(target, deliverySessFront, items, msg, admissionTarget)
 	if err != nil {
-		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
-		return false, errors.Join(bookkeepErr, err, relErr)
+		return false, errors.Join(bookkeepErr, err)
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	request := worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
-	})
+	}
+	if managedAdmission {
+		admission := queuedNudgeAdmissionRequest(attempt)
+		request.Admission = &admission
+	}
+	result, err := handle.Nudge(context.Background(), request)
+	if managedAdmission {
+		if err != nil || result.Admission == nil {
+			if err == nil {
+				err = errors.New("provider returned no command receipt")
+			}
+			holdErr := withNudgeQueueState(target.cityPath, func(state *nudgeQueueState) error { return nudgequeue.HoldSubmission(state, attempt, err.Error()) })
+			return false, errors.Join(bookkeepErr, err, nudgequeue.ErrSubmissionUnconfirmed, holdErr)
+		}
+		return result.Admission.State == "accepted", errors.Join(bookkeepErr, applyQueuedNudgeAdmissionReceipt(target.cityPath, deliveryStore, attempt, *result.Admission))
+	}
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
 		if errors.Is(err, runtime.ErrSessionNotFound) {
-			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
+			if recErr := resolveQueuedNudgeSubmission(target.cityPath, deliveryStore, attempt, "retry"); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}
 			return false, bookkeepErr
@@ -1861,24 +2040,178 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			// attempt-counting/dead-letter path — that would re-inject the same
 			// reminder on the next pass.
 			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
-			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
+			ackErr := resolveQueuedNudgeSubmission(target.cityPath, deliveryStore, attempt, "injected_unobserved")
 			return true, errors.Join(bookkeepErr, ackErr)
 		}
-		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
-			return false, errors.Join(bookkeepErr, recErr)
-		}
-		return false, bookkeepErr
+		holdErr := withNudgeQueueState(target.cityPath, func(state *nudgeQueueState) error {
+			return nudgequeue.HoldSubmission(state, attempt, err.Error())
+		})
+		return false, errors.Join(bookkeepErr, err, nudgequeue.ErrSubmissionUnconfirmed, holdErr)
 	}
 	if !result.Delivered {
 		// The runtime declined without an error (e.g. the session stopped
 		// between observation and delivery). Release the claims so the next
 		// pass retries promptly instead of waiting out the in-flight lease.
-		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		relErr := resolveQueuedNudgeSubmission(target.cityPath, deliveryStore, attempt, "retry")
 		return false, errors.Join(bookkeepErr, relErr)
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
-	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+	return true, errors.Join(bookkeepErr, resolveQueuedNudgeSubmission(target.cityPath, deliveryStore, attempt, "injected"))
+}
+
+func beginQueuedNudgeSubmission(target nudgeTarget, sessFront *session.Store, items []queuedNudge, message string, admissionTarget *runtime.AdmissionTarget) (nudgequeue.SubmissionAttempt, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nudgequeue.SubmissionAttempt{}, fmt.Errorf("create submission identity: %w", err)
+	}
+	digest := sha256.Sum256([]byte(message))
+	attempt := nudgequeue.SubmissionAttempt{
+		ID: id.String(), NudgeIDs: queuedNudgeIDs(items),
+		SessionID: target.sessionID, ContinuationEpoch: target.continuationEpoch,
+		SessionName: target.sessionName, ContentSHA256: hex.EncodeToString(digest[:]),
+		Text:      message,
+		StartedAt: time.Now().UTC(), ClaimedAt: items[0].ClaimedAt,
+		ReceiptCapable: admissionTarget != nil,
+	}
+	if sessFront != nil && target.sessionID != "" {
+		info, err := sessFront.Get(target.sessionID)
+		if err != nil {
+			return attempt, err
+		}
+		attempt.RuntimeToken = info.InstanceToken
+		attempt.ProviderSessionID = info.SessionKey
+	}
+	if admissionTarget != nil {
+		attempt.ProviderSessionID = admissionTarget.ProviderSessionID
+		attempt.RuntimeToken = admissionTarget.Fence.RuntimeToken
+		attempt.SessionID = admissionTarget.Fence.SessionID
+		attempt.ContinuationEpoch = admissionTarget.Fence.ContinuationEpoch
+	}
+	err = withNudgeQueueState(target.cityPath, func(state *nudgeQueueState) error {
+		return nudgequeue.BeginSubmission(state, attempt)
+	})
+	return attempt, err
+}
+
+func resolveQueuedNudgeSubmission(cityPath string, store beads.Store, attempt nudgequeue.SubmissionAttempt, outcome string) error {
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		return finishQueuedNudgeSubmission(state, store, attempt, outcome, "", "provider-nudge-return")
+	})
+}
+
+func finishQueuedNudgeSubmission(state *nudgeQueueState, store beads.Store, attempt nudgequeue.SubmissionAttempt, outcome, reason, boundary string) error {
+	items, err := nudgequeue.SubmissionItems(state, attempt)
+	if err != nil {
+		return err
+	}
+	if outcome != "retry" {
+		for _, item := range items {
+			if err := markQueuedNudgeTerminal(beads.NudgesStore{Store: store}, item, outcome, reason, boundary, time.Now()); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = nudgequeue.ResolveSubmission(state, attempt, outcome == "retry")
+	if err == nil && outcome == "failed" {
+		for _, item := range items {
+			item.LastError = reason
+			item.DeadAt = time.Now().UTC()
+			state.Dead = append(state.Dead, item)
+		}
+	}
+	return err
+}
+
+func queuedNudgeAdmissionRequest(a nudgequeue.SubmissionAttempt) runtime.AdmissionRequest {
+	return runtime.AdmissionRequest{
+		CommandID: a.ID, ProviderSessionID: a.ProviderSessionID, Text: a.Text,
+		Fence: runtime.AdmissionFence{SessionID: a.SessionID, ContinuationEpoch: a.ContinuationEpoch, RuntimeToken: a.RuntimeToken},
+	}
+}
+
+func applyQueuedNudgeAdmissionReceipt(cityPath string, store beads.Store, attempt nudgequeue.SubmissionAttempt, receipt runtime.AdmissionReceipt) error {
+	req := queuedNudgeAdmissionRequest(attempt)
+	if receipt.CommandID != req.CommandID || receipt.ProviderSessionID != req.ProviderSessionID || receipt.Fence != req.Fence {
+		return nudgequeue.ErrSubmissionUnconfirmed
+	}
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		switch receipt.State {
+		case "not_admitted":
+			if receipt.Terminal != "" {
+				return nudgequeue.ErrSubmissionUnconfirmed
+			}
+			items, err := nudgequeue.SubmissionItems(state, attempt)
+			if err != nil {
+				return err
+			}
+			previous, err := nudgequeue.DecodeSubmission(items[0])
+			if err != nil {
+				return err
+			}
+			if previous.Admission == "accepted" {
+				return fmt.Errorf("provider no-admission contradicts retained acceptance: %w", nudgequeue.ErrSubmissionUnconfirmed)
+			}
+			if _, err := nudgequeue.ResolveSubmission(state, attempt, false); err != nil {
+				return err
+			}
+			now := time.Now()
+			for _, item := range items {
+				failed, dead := failedQueuedNudge(item, fmt.Errorf("provider did not admit command: %s", receipt.Reason), now)
+				if dead {
+					state.Dead = append(state.Dead, failed)
+				} else {
+					state.Pending = append(state.Pending, failed)
+				}
+			}
+			return nil
+		case "accepted":
+			if receipt.Terminal == "completed" {
+				return finishQueuedNudgeSubmission(state, store, attempt, "injected", "", "provider-terminal-receipt")
+			}
+			if receipt.Terminal != "" {
+				return finishQueuedNudgeSubmission(state, store, attempt, "failed", "provider terminal "+receipt.Terminal+": "+receipt.Reason, "provider-terminal-receipt")
+			}
+			return nudgequeue.UpdateSubmission(state, nudgequeue.Submission{Attempt: attempt, Admission: "accepted", TurnID: receipt.TurnID, Reason: "admitted; awaiting observed terminal outcome"})
+		default:
+			return nudgequeue.HoldSubmission(state, attempt, "provider admission remains unknown: "+receipt.Reason)
+		}
+	})
+}
+
+// Reconciliation only reads receipts. It never reissues an ambiguous command,
+// and never asks a replacement runtime to resolve an earlier incarnation.
+func reconcileQueuedNudgeSubmissions(target nudgeTarget, handle worker.Handle, store beads.Store) error {
+	state, err := nudgequeue.LoadState(target.cityPath)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool)
+	for _, item := range state.Dead {
+		if !nudgequeue.IsSubmission(item) || !target.matchesQueueAgent(item.Agent) {
+			continue
+		}
+		s, err := nudgequeue.DecodeSubmission(item)
+		if err != nil {
+			return err
+		}
+		a := s.Attempt
+		if seen[a.ID] || a.SessionName != target.sessionName || a.SessionID != target.sessionID {
+			continue
+		}
+		seen[a.ID] = true
+		if !a.ReceiptCapable {
+			continue
+		}
+		receipt, err := nudgeReadReceipt(context.Background(), handle, queuedNudgeAdmissionRequest(a))
+		if err != nil {
+			return fmt.Errorf("read held nudge receipt %s: %w", a.ID, err)
+		}
+		if err := applyQueuedNudgeAdmissionReceipt(target.cityPath, store, a, receipt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -3241,6 +3574,10 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
+		}
+		if nudgequeue.IsSubmission(item) {
+			filtered = append(filtered, item)
+			continue
 		}
 		if item.BeadID != "" {
 			if front == nil {

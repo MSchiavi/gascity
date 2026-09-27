@@ -274,6 +274,80 @@ esac
 
 ## Environment Variables
 
+### Managed command admission
+
+An executable declaring `message-admission` in its `protocol` capabilities
+supports these bounded JSON operations. None falls back to terminal input:
+
+- `admit <name>` takes `command_id`, `provider_session_id`, `text`, and
+  `fence` (`session_id`, `continuation_epoch`, `runtime_token`) on stdin.
+  The immutable command ID must be a provider-supported UUID; Muse requires
+  UUIDv7. A durable unknown marker precedes the possible request write.
+- `receipt <name> <command_id>` takes the same complete request on stdin.
+  It queries the original submission rather than resending it.
+- Both return the complete echoed identity, `state` (`accepted`,
+  `not_admitted`, or `unknown`), and optional `receipt_id`, `turn_id`,
+  `disposition`, `terminal`, and `reason`. Acceptance is not execution or
+  success. A cached `started` disposition is not a new start notification.
+- `status <name>` returns `provider_session_id`, the current `fence`,
+  `last_command_id`, `last_receipt`, `last_observed_run_id`, `pending_count`,
+  `ready`, and identity-only lifecycle events in one snapshot.
+- `conditional-admit <name>` adds `expected_command_id` to an admission
+  request. The Muse host requires the same incarnation, a known terminal
+  outcome, no pending commands/turns, and no newer observed run. It submits
+  a follow-up with `ifBusy=queue`; it never resets or replays tools.
+
+The Muse adapter launches a detached MSP host behind a private Unix socket
+and lifetime lock. It owns a native UUIDv7 per GC session ID and continuation
+epoch, persisted before `session/start`. A new process token resumes the same
+conversation; a changed session ID or epoch creates a fresh UUID and archives
+the old receipt evidence. The worker reads the exact native UUID and current
+fence from one `status` snapshot; it does not overwrite the bead's session key.
+Explicit `--session-id`/`muse resume <key>` must agree with the stored mapping;
+ordinary generated UUIDv4 keys are rejected by the tested Muse version.
+Retained outcomes are reconciled only from that session's bound provider log;
+ambiguous attempts remain held, and archived receipts remain queryable with
+their original command, provider UUID, text digest, and fence.
+
+Required adapter environment: `GC_MUSE_MSP_DIR` (owned mode 0700 directory),
+`GC_MUSE_MSP_BIN` (absolute installed binary), and
+`GC_MUSE_MSP_PROVIDER` (explicit provider). Optional
+`GC_MUSE_MSP_DATA_HOME` selects dedicated persistent Muse data for this
+child without changing the supervisor's environment or authentication HOME.
+A configured shared TUI data/index directory timed out during initialize;
+the same configuration with fresh separate data initialized in 0.4 seconds.
+Keep managed data separate and retain it for resume. Optional
+`GC_MUSE_MSP_MODEL`, `GC_MUSE_MSP_REASONING`, and `GC_MUSE_MSP_APPROVAL`
+select model, reasoning effort, and a preconfigured approval mode. Reasoning
+is sent as the schema-defined `turn/start.reasoningEffort` for every command;
+`max` is preserved. It is not an unsupported `muse serve` CLI flag.
+`GC_MUSE_MSP_DISABLE_SHELL=1` disables shell tools for isolated checks.
+Supported managed command flags are `--session-id`, `--provider`, `--model`,
+`--reasoning-effort`, explicit host sandbox flags, and
+`--dangerously-skip-permissions`/`--yolo` (allowAll, disabled sandbox, trusted
+workspace). No privileged fallback is inferred. One positional startup prompt
+is supported, including after `--`; a distinct post-ready nudge remains a
+separate persisted command. Resume refuses changed provider/model/approval,
+host posture, or workspace settings rather than silently ignoring them.
+Unsupported flags fail rather than being ignored. Runtime copy/overlay and
+setup commands run before the host initializes; startup nudges use a
+persisted UUID keyed to the runtime instance token. Initialization failures
+record only phase, exception class, and filtered RPC error fields privately.
+The last 64 KiB of child stderr stays in the private host directory for
+diagnosis and never appears in command receipts or status.
+Startup cancellation uses a private marker fenced to the launching host
+token; it cancels initialization and prevents a later startup prompt. Stop
+waits for the owned lifetime lock to release. Unsupported server requests
+receive a protocol error and become an observable blocked state; this host
+does not implement interactive approvals.
+
+This adapter has no terminal attach, keystroke, or best-effort nudge surface.
+The isolated whole-GC echo canary queued a nudge, retained its completed
+terminal receipt, and preserved the native UUID across supervisor restart.
+This does not certify worker tools or a live-city migration. Persistent
+provider wrapper settings must remain available after supervisor relaunch.
+Peek exposes transport status; it is not a transcript or approval interface.
+
 Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
 state files (metadata, wrappers). If not set, scripts should use a
 reasonable default under `$TMPDIR` or `/tmp`.

@@ -13,6 +13,17 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+func TestSelectedProviderReturnsRoutedBackend(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	h := New(local, remote, isRemote)
+	if got := h.SelectedProvider("local-agent"); got != local {
+		t.Fatalf("SelectedProvider(local) = %T, want local backend", got)
+	}
+	if got := h.SelectedProvider("remote-agent-1"); got != remote {
+		t.Fatalf("SelectedProvider(remote) = %T, want remote backend", got)
+	}
+}
+
 type livenessObservationErrorProvider struct {
 	*runtime.Fake
 	err error

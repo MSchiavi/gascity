@@ -109,6 +109,21 @@ func (r *Registry) New(name string, sc config.SessionConfig, cityName, cityPath 
 	return p, nil
 }
 
+// NewExplicit resolves only an exact name or registered prefix. It omits the
+// default fallback and is for configuration fields that explicitly select a
+// backend, where a typo must not silently become tmux.
+func (r *Registry) NewExplicit(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	f := r.lookupExplicit(name)
+	if f == nil {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownRuntime, name)
+	}
+	p, err := f(name, sc, cityName, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("constructing runtime provider %q: %w", name, err)
+	}
+	return p, nil
+}
+
 func (r *Registry) lookup(name string) Factory {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -126,6 +141,22 @@ func (r *Registry) lookup(name string) Factory {
 		return best
 	}
 	return r.fallback
+}
+
+func (r *Registry) lookupExplicit(name string) Factory {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if f, ok := r.exact[name]; ok {
+		return f
+	}
+	var bestPrefix string
+	var best Factory
+	for prefix, f := range r.prefixes {
+		if strings.HasPrefix(name, prefix) && len(prefix) > len(bestPrefix) {
+			bestPrefix, best = prefix, f
+		}
+	}
+	return best
 }
 
 // Clone returns a registry with the receiver's registrations that shares

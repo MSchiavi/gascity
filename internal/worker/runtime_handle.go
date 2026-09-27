@@ -248,6 +248,9 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		event.payload.Delivered = boolPointer(result.Delivered)
 		event.finish(err)
 	}()
+	if req.Admission != nil {
+		return admitNudge(ctx, h, req)
+	}
 
 	if strings.TrimSpace(req.Text) == "" {
 		err = fmt.Errorf("nudge text is required")

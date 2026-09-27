@@ -2533,8 +2533,11 @@ func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Send a text message to a running session",
 		Long: `Send text input to a running session via the runtime provider.
 
-The message is delivered as text content to the session's input. This is
-equivalent to typing the message into the session's terminal.
+Terminal providers deliver text to the session's input. For a managed
+provider with command receipts, use --delivery queue: admission and execution
+outcome are tracked separately. An accepted submission is retained until an
+observed terminal outcome; unconfirmed submissions are not sent again
+automatically. Inspect them with gc nudge status.
 
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.`,

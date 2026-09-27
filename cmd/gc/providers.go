@@ -25,7 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
-	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
+	"github.com/gastownhall/gascity/internal/runtime/registry"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -168,6 +168,9 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if spec.Runtime == "hybrid" {
+		return newHybridProviderWithRegistry(sc, cityName, cityPath, reg)
 	}
 	return reg.New(spec.Runtime, sc, cityName, cityPath)
 }
@@ -1234,12 +1237,30 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 // env var controls which sessions go to k8s. If unset, all sessions route to
 // local tmux.
 func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
-	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	reg, err := runtimeRegistryForCity(nil)
 	if err != nil {
-		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+		return nil, fmt.Errorf("hybrid: runtime registry: %w", err)
+	}
+	return newHybridProviderWithRegistry(sc, cityName, cityPath, reg)
+}
+
+func newHybridProviderWithRegistry(sc config.SessionConfig, cityName, cityPath string, reg *registry.Registry) (runtime.Provider, error) {
+	// Cut-over: hybrid routes through the runtime registry so one explicitly
+	// selected remote backend can be piloted without moving every session.
+	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
+	remoteName := strings.TrimSpace(sc.RemoteProvider)
+	if remoteName == "" {
+		remoteName = "k8s"
+	}
+	if remoteName == "hybrid" {
+		return nil, fmt.Errorf("hybrid: remote_provider cannot be hybrid")
+	}
+	if reg == nil {
+		return nil, fmt.Errorf("hybrid: remote provider registry is unavailable")
+	}
+	remote, err := reg.NewExplicit(remoteName, sc, cityName, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid: %s backend: %w", remoteName, err)
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {

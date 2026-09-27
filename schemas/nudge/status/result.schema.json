@@ -51,6 +51,10 @@
         },
         "dead": {
           "type": "integer"
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": true
@@ -71,6 +75,12 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/nudge"
+      }
+    },
+    "blocked": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blocked_submission"
       }
     }
   },
@@ -153,6 +163,107 @@
         "dead_at": {
           "type": "string",
           "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "submission_attempt": {
+      "type": "object",
+      "required": [
+        "id",
+        "nudge_ids",
+        "session_name",
+        "content_sha256",
+        "text",
+        "started_at",
+        "claimed_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "continuation_epoch": {
+          "type": "string"
+        },
+        "session_name": {
+          "type": "string"
+        },
+        "runtime_token": {
+          "type": "string"
+        },
+        "provider_session_id": {
+          "type": "string"
+        },
+        "content_sha256": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "nudge_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "claimed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "receipt_capable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "blocked_submission": {
+      "type": "object",
+      "required": [
+        "nudge_id",
+        "state",
+        "submission"
+      ],
+      "properties": {
+        "nudge_id": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "submission_unconfirmed",
+            "admitted_awaiting_outcome"
+          ]
+        },
+        "submission": {
+          "type": "object",
+          "required": [
+            "attempt",
+            "reason"
+          ],
+          "properties": {
+            "attempt": {
+              "$ref": "#/$defs/submission_attempt"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "admission": {
+              "type": "string"
+            },
+            "turn_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true

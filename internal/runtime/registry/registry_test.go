@@ -152,6 +152,24 @@ func TestUnknownNameWithoutFallbackErrors(t *testing.T) {
 	}
 }
 
+func TestNewExplicitDoesNotUseFallback(t *testing.T) {
+	r := New()
+	fallback, calls := fakeFactory(t)
+	r.SetFallback(fallback)
+	if _, err := r.NewExplicit("misspelled-provider", config.SessionConfig{}, "city", t.TempDir()); !errors.Is(err, ErrUnknownRuntime) {
+		t.Fatalf("NewExplicit unknown error = %v, want ErrUnknownRuntime", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("fallback calls = %d, want 0", *calls)
+	}
+	if err := r.RegisterPrefix("exec:", fallback); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NewExplicit("exec:/provider", config.SessionConfig{}, "city", t.TempDir()); err != nil {
+		t.Fatalf("NewExplicit registered prefix: %v", err)
+	}
+}
+
 func TestFactoryErrorsPropagate(t *testing.T) {
 	r := New()
 	boom := errors.New("kubeconfig missing")

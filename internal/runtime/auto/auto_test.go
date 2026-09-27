@@ -94,6 +94,19 @@ func TestRouteDefaultAndACP(t *testing.T) {
 	}
 }
 
+func TestSelectedProviderReturnsRoutedBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+	p.RouteACP("agent-b")
+	if got := p.SelectedProvider("agent-a"); got != defaultSP {
+		t.Fatalf("SelectedProvider(default) = %T, want default backend", got)
+	}
+	if got := p.SelectedProvider("agent-b"); got != acpSP {
+		t.Fatalf("SelectedProvider(ACP) = %T, want ACP backend", got)
+	}
+}
+
 func TestUnroute(t *testing.T) {
 	defaultSP := runtime.NewFake()
 	acpSP := runtime.NewFake()
