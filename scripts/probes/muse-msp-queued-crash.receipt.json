@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "version": "Muse Code 1.4.0 (1.4.0-R4302.1)",
+  "scenario": "queued-crash",
+  "provider": "echo",
+  "modelCalls": 0,
+  "sessionId": "01a0e1a2-d3f1-7559-9394-9b91224db551",
+  "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+  "admissionReplayPassed": false,
+  "replayTimedOut": true,
+  "replayTimeoutSource": "bounded isolated harness observation; server remained alive",
+  "resumeStatus": "idle",
+  "events": [
+    {
+      "sequence": 26,
+      "type": "runtime.command_intake.received",
+      "durability": "durable",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1"
+    },
+    {
+      "sequence": 27,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+      "sourceSessionId": "01a0e1a2-d3f1-7559-9394-9b91224db551",
+      "deliveryPolicy": "after_current_terminal",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    },
+    {
+      "sequence": 28,
+      "recordId": "eb87111f-bd8e-5e6b-90ee-037c35f650e9",
+      "type": "runtime.session",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+      "runId": "01a0e1a2-d3f1-7559-9394-9b93dbb6f30a",
+      "durability": "durable",
+      "event": "inbox_item_queued",
+      "terminal": null,
+      "reason": null,
+      "queueItemId": null,
+      "queuedRecordId": "0e726585-2dd7-503b-931f-bf71cc90aad1",
+      "deliveryVisible": null,
+      "causationId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1"
+    },
+    {
+      "sequence": 30,
+      "type": "runtime.command_intake.settled",
+      "durability": "durable",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+      "outcome": {
+        "kind": "abandoned",
+        "reason": "no committed command outcome after restart"
+      }
+    },
+    {
+      "sequence": 31,
+      "type": "runtime.queued_turn.reclaim_settled",
+      "durability": "durable",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+      "outcome": "reclaimed"
+    },
+    {
+      "sequence": 32,
+      "type": "session.resumed",
+      "resumedFrom": 28
+    },
+    {
+      "sequence": 33,
+      "recordId": "ce339b3b-378f-594a-ba05-d88a0f24d228",
+      "type": "runtime.session",
+      "commandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+      "runId": "01a0e1a2-d3f1-7559-9394-9b93dbb6f30a",
+      "durability": "durable",
+      "event": "inbox_item_drained",
+      "terminal": null,
+      "reason": null,
+      "queueItemId": "0e726585-2dd7-503b-931f-bf71cc90aad1",
+      "queuedRecordId": null,
+      "deliveryVisible": false,
+      "causationId": "0e726585-2dd7-503b-931f-bf71cc90aad1"
+    },
+    {
+      "sequence": 34,
+      "type": "session.resumed",
+      "resumedFrom": 33
+    }
+  ],
+  "limitation": "No queued successor start observed; timeout is not proof of permanent loss or paid-provider behavior",
+  "replayDeadlineSeconds": 10,
+  "replayResponse": "none",
+  "processAliveAtReplayDeadline": true,
+  "cleanup": "only probe-owned server PID killed",
+  "replayedCommandId": "01a0e1a2-d3f1-7559-9394-9b923c7e42e1",
+  "replayedSessionId": "01a0e1a2-d3f1-7559-9394-9b91224db551",
+  "fromScratchAttempt": {
+    "schemaVersion": 1,
+    "admissionReplayPassed": false,
+    "limitation": "Acceptance and cached disposition do not prove successful or resumed execution",
+    "scenario": "queued-crash",
+    "version": "Muse Code 1.4.0 (1.4.0-R4302.1)",
+    "sessionId": "01a0e1a7-6524-7e0f-9d4d-96c691ebad93",
+    "commandId": "01a0e1a7-6524-7e51-bc22-b70d17250c35",
+    "provider": "echo",
+    "concurrentReplies": [
+      {
+        "status": "accepted",
+        "disposition": "queued",
+        "turnId": "01a0e1a7-6524-7e51-bc22-b70d17250c35"
+      },
+      {
+        "status": "accepted",
+        "disposition": "started",
+        "turnId": "01a0e1a7-65e9-7b76-92d7-c16ec7535687"
+      }
+    ],
+    "initialReply": {
+      "status": "accepted",
+      "disposition": "queued",
+      "turnId": "01a0e1a7-6524-7e51-bc22-b70d17250c35"
+    },
+    "beforeCrash": [
+      {
+        "sequence": 26,
+        "type": "runtime.command_intake.received",
+        "durability": "durable",
+        "commandId": "01a0e1a7-6524-7e51-bc22-b70d17250c35"
+      },
+      {
+        "sequence": 27,
+        "type": "runtime.user_intent.accepted",
+        "durability": "durable",
+        "commandId": "01a0e1a7-6524-7e51-bc22-b70d17250c35",
+        "sourceSessionId": "01a0e1a7-6524-7e0f-9d4d-96c691ebad93",
+        "envelopeSequence": null,
+        "outcome": null,
+        "startedRecordId": null
+      },
+      {
+        "sequence": 28,
+        "recordId": "07aa7221-b4b3-5094-9093-9471d86b3fd0",
+        "type": "runtime.session",
+        "commandId": "01a0e1a7-6524-7e51-bc22-b70d17250c35",
+        "runId": "01a0e1a7-65e9-7b76-92d7-c16ec7535687",
+        "durability": "durable",
+        "event": "inbox_item_queued",
+        "terminal": null,
+        "reason": null,
+        "queueItemId": null,
+        "deliveryVisible": null,
+        "causationId": "01a0e1a7-6524-7e51-bc22-b70d17250c35"
+      }
+    ],
+    "resumeStatus": "idle",
+    "errorType": "RuntimeError",
+    "error": "MSP turn/start error code -32030"
+  }
+}
