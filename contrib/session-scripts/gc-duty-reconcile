@@ -3,6 +3,7 @@
 
 Unknown enqueue outcomes remain pinned in the private state file. Resolve
 them only after inspecting the managed receipt; elapsed time is no proof.
+Pending, blocked, or dead reminders hold duty until they are inspected.
 """
 import argparse
 import fcntl
@@ -44,10 +45,12 @@ def skip_reason(target, row, bead, queue, host, previous, now, interval):
     if queue.get('session_id') != row['id']:
         return 'queue_identity_changed'
     counts = queue.get('counts') or {}
+    if not {'pending', 'in_flight', 'dead'}.issubset(counts):
+        return 'queue_unknown'
     if any(counts.get(key, 0) != 0 for key in ('pending', 'in_flight', 'blocked')):
         return 'queue_pending'
-    if 'pending' not in counts or 'in_flight' not in counts:
-        return 'queue_unknown'
+    if counts['dead'] != 0:
+        return 'queue_dead'
     expected = {'session_id': row['id'], 'continuation_epoch': metadata.get('continuation_epoch'), 'runtime_token': metadata.get('instance_token')}
     if not all(expected.values()) or host.get('fence') != expected or not host.get('ready') or not host.get('provider_session_id'):
         return 'provider_identity_changed'

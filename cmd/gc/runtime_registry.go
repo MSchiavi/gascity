@@ -23,7 +23,13 @@ import (
 // runtimeRegistryForCity — this registry itself is never mutated after
 // construction. The behavior contract for selection lives in
 // internal/runtime/REQUIREMENTS.md (RUNTIME-SEL rows).
-var runtimeRegistry = buildRuntimeRegistry()
+var runtimeRegistry *registry.Registry
+
+func init() {
+	// Hybrid factories resolve other builtins, which would form a variable
+	// initialization cycle if this call were in the declaration above.
+	runtimeRegistry = buildRuntimeRegistry()
+}
 
 // buildRuntimeRegistry registers the builtin runtime providers. Each
 // registration mirrors one arm of the pre-registry selection switch;
@@ -89,7 +95,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return newHybridProviderWithRegistry(sc, cityName, cityPath, r)
+		return newHybridProvider(sc, cityName, cityPath)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")

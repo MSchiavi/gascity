@@ -191,6 +191,30 @@ class Receipts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 msp.stage({'work_dir': folder, 'copy_files': [{'src': 'unused', 'rel_dst': '../escape'}]}, {})
 
+    def test_initial_conditional_admission_requires_no_observed_run_or_pending_work(self):
+        for observed, pending, allowed in ((None, 0, True), ('untracked-run', 0, False), (None, 1, False)):
+            with self.subTest(observed=observed, pending=pending), tempfile.TemporaryDirectory() as folder:
+                host = self.host(folder)
+                fence = {'session_id': 'gc-test', 'continuation_epoch': '1', 'runtime_token': 'token'}
+                host.state['fence'] = fence
+                host.reconcile = lambda: None
+                host.status = lambda: {'pending_count': pending, 'last_command_id': None, 'last_observed_run_id': observed}
+                sent = []
+                def rpc(method, params):
+                    sent.append(params)
+                    return {'commandId': params['commandId'], 'status': 'accepted', 'turnId': 'turn', 'disposition': 'started'}
+                host.rpc = rpc
+                request = {'command_id': msp.uuid7(), 'provider_session_id': 's', 'fence': fence,
+                           'expected_command_id': None, 'text': 'reconcile'}
+                if allowed:
+                    self.assertEqual(host.admit(request, conditional=True)['state'], 'accepted')
+                    self.assertEqual(len(sent), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        host.admit(request, conditional=True)
+                    self.assertEqual(sent, [])
+                    self.assertEqual(host.state['receipts'], {})
+
     def test_conditional_recovery_refuses_newer_run(self):
         with tempfile.TemporaryDirectory() as folder:
             host = self.host(folder)

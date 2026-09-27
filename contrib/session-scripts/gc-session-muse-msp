@@ -518,12 +518,16 @@ class Host:
             snapshot = self.status()
             if snapshot['pending_count'] or snapshot['last_command_id'] != request.get('expected_command_id'):
                 raise ValueError('recovery condition changed')
-            expected = self.receipt(request['expected_command_id'])
-            allowed_runs = (None, expected.get('turn_id'))
-            if expected.get('terminal') in ('terminal_no_effect', 'abandoned'):
-                allowed_runs += (expected.get('prior_run_id'),)
-            if not expected.get('terminal') or snapshot['last_observed_run_id'] not in allowed_runs:
-                raise ValueError('newer lifecycle or unknown terminal')
+            if request.get('expected_command_id') is None:
+                if snapshot['last_observed_run_id'] is not None:
+                    raise ValueError('initial admission has an observed run')
+            else:
+                expected = self.receipt(request['expected_command_id'])
+                allowed_runs = (None, expected.get('turn_id'))
+                if expected.get('terminal') in ('terminal_no_effect', 'abandoned'):
+                    allowed_runs += (expected.get('prior_run_id'),)
+                if not expected.get('terminal') or snapshot['last_observed_run_id'] not in allowed_runs:
+                    raise ValueError('newer lifecycle or unknown terminal')
         receipt = {'state': 'unknown', 'command_id': command, 'provider_session_id': session,
                    'fence': fence, 'content_sha256': digest,
                    'prior_run_id': self.state.get('last_observed_run_id')}

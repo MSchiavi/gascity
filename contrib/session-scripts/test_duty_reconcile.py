@@ -14,7 +14,7 @@ class Duty(unittest.TestCase):
         target = {'session': 'duty', 'provider': 'managed', 'message': 'Reconcile durable work.', 'allow_without_work': True}
         row = {'id': 'gc-one', 'state': 'active', 'attached': False, 'session_name': 'runtime'}
         bead = {'id': 'gc-one', 'metadata': {'provider': 'managed', 'state': 'active', 'continuation_epoch': '1', 'instance_token': 'token'}}
-        queue = {'session_id': 'gc-one', 'counts': {'pending': 0, 'in_flight': 0, 'blocked': 0}}
+        queue = {'session_id': 'gc-one', 'counts': {'pending': 0, 'in_flight': 0, 'dead': 0, 'blocked': 0}}
         host = {'ready': True, 'provider_session_id': 'native', 'fence': {'session_id': 'gc-one', 'continuation_epoch': '1', 'runtime_token': 'token'}, 'pending_count': 0, 'last_receipt': {'state': 'accepted', 'terminal': 'failed'}}
         return target, row, bead, queue, host
 
@@ -30,6 +30,12 @@ class Duty(unittest.TestCase):
         self.assertEqual(duty.skip_reason(*parts, {}, 2000, 1800), 'inactive_or_attached')
         parts = self.fixtures(); parts[3]['counts']['blocked'] = 1
         self.assertEqual(duty.skip_reason(*parts, {}, 2000, 1800), 'queue_pending')
+        parts = self.fixtures(); parts[3]['counts'].pop('blocked'); parts[3]['counts']['dead'] = 1
+        self.assertEqual(duty.skip_reason(*parts, {}, 2000, 1800), 'queue_dead')
+        parts = self.fixtures(); parts[3]['counts'].pop('dead')
+        self.assertEqual(duty.skip_reason(*parts, {}, 2000, 1800), 'queue_unknown')
+        parts = self.fixtures(); parts[3]['counts'].pop('blocked')
+        self.assertIsNone(duty.skip_reason(*parts, {}, 2000, 1800))
 
     def test_unknown_or_busy_never_periodically_retries(self):
         parts = self.fixtures(); parts[4]['pending_count'] = 1
