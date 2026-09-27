@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "admissionReplayPassed": false,
+  "limitation": "Acceptance and cached disposition do not prove successful or resumed execution",
+  "scenario": "admission-crash",
+  "version": "Muse Code 1.4.0 (1.4.0-R4302.1)",
+  "sessionId": "01a0e1b1-8c19-7a10-9e20-018dd32d8033",
+  "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+  "provider": "echo",
+  "initialReply": {
+    "status": "accepted",
+    "disposition": "started",
+    "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+    "turnId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8"
+  },
+  "beforeCrash": [
+    {
+      "sequence": 8,
+      "type": "runtime.command_intake.received",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8"
+    },
+    {
+      "sequence": 9,
+      "type": "runtime.command_intake.settled",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "outcome": {
+        "kind": "accepted"
+      }
+    },
+    {
+      "sequence": 11,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "sourceSessionId": "01a0e1b1-8c19-7a10-9e20-018dd32d8033",
+      "deliveryPolicy": "session_current",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    }
+  ],
+  "resumeStatus": "idle",
+  "replayReply": {
+    "status": "accepted",
+    "disposition": "started",
+    "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+    "turnId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8"
+  },
+  "afterResume": [
+    {
+      "sequence": 8,
+      "type": "runtime.command_intake.received",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8"
+    },
+    {
+      "sequence": 9,
+      "type": "runtime.command_intake.settled",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "outcome": {
+        "kind": "accepted"
+      }
+    },
+    {
+      "sequence": 11,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "sourceSessionId": "01a0e1b1-8c19-7a10-9e20-018dd32d8033",
+      "deliveryPolicy": "session_current",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    },
+    {
+      "sequence": 12,
+      "type": "session.resumed",
+      "resumedFrom": null
+    },
+    {
+      "sequence": 13,
+      "type": "runtime.user_intent.materialized",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "sourceSessionId": "01a0e1b1-8c19-7a10-9e20-018dd32d8033",
+      "deliveryPolicy": null,
+      "envelopeSequence": 11,
+      "outcome": "terminal_no_effect",
+      "startedRecordId": null
+    },
+    {
+      "sequence": 14,
+      "type": "runtime.command_intake.received",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8"
+    },
+    {
+      "sequence": 15,
+      "type": "runtime.command_intake.settled",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "outcome": {
+        "kind": "accepted"
+      }
+    },
+    {
+      "sequence": 17,
+      "type": "runtime.user_intent.accepted",
+      "durability": "durable",
+      "commandId": "01a0e1b1-8c19-7da5-9e0c-55de64a048b8",
+      "sourceSessionId": "01a0e1b1-8c19-7a10-9e20-018dd32d8033",
+      "deliveryPolicy": "session_current",
+      "envelopeSequence": null,
+      "outcome": null,
+      "startedRecordId": null
+    }
+  ],
+  "errorType": "RuntimeError",
+  "error": "durable acceptance/replay identity assertion failed",
+  "observedCrashPhase": "accepted-before-observed-start",
+  "preCrashRunStarted": false
+}
